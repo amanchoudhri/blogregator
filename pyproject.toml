@@ -1,0 +1,23 @@
+[project]
+name = "blogregator"
+version = "0.1.0"
+description = "Blogregator is a tool for automatically scraping blogs, extracting metadata from posts, and updating you when a new post drops."
+readme = "README.md"
+authors = [
+    { name = "Aman Choudhri", email = "amanchoudhri@gmail.com" }
+]
+requires-python = ">=3.9"
+dependencies = [
+    "apscheduler>=3.11.0",
+    "beautifulsoup4>=4.13.4",
+    "litellm>=1.69.2",
+    "requests>=2.32.3",
+    "typer>=0.15.3",
+]
+
+[project.scripts]
+blogregator = "blogregator.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
