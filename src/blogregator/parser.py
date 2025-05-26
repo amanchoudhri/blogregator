@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from typing import List, Dict, Any, Optional
 
-def parse_with_config(page_url: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+def parse_post_list(page_url: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Extracts blog post data from a given URL using a JSON configuration object.
 
