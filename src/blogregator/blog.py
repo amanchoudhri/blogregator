@@ -124,7 +124,7 @@ def add_blog(
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM blogs WHERE url = %s", (url,))
-    count = cursor.fetchone()[0]
+    count = cursor.fetchone()['count']
     if count > 0:
         if not typer.confirm(f"Blog with URL {url} already exists. Overwrite?"):
             conn.close()
