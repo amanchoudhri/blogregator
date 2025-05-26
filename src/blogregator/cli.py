@@ -1,49 +1,42 @@
 import json
 
-from sqlite3 import Cursor
 from typing import Annotated
 
 import typer
 
 from blogregator.blog import blog_cli
-from blogregator.database import init_db, get_connection
-from blogregator.parser import parse_with_config
+from blogregator.database import get_connection
+from blogregator.parser import parse_post_list
 from blogregator.utils import utcnow
 
 app = typer.Typer()
 app.add_typer(blog_cli, name='blog', help="Commands for managing individual blogs.")
 
-@app.command()
-def init():
-    """Initialize SQLite DB and create tables."""
-    init_db()
-    typer.echo("Database initialized.")
-
-
-def fetch_blogs(cursor: Cursor, blog_id: int | None):
+def fetch_blogs(cursor, blog_id: int | None):
     """Retrieve active blogs or a specific blog by ID."""
     if blog_id is not None:
-        cursor.execute("SELECT * FROM blogs WHERE id = ?", (blog_id,))
+        cursor.execute("SELECT * FROM blogs WHERE id = %s", (blog_id,))
     else:
-        cursor.execute("SELECT * FROM blogs WHERE status = 'Active'")
+        cursor.execute("SELECT * FROM blogs WHERE status = %s", ('Active',))
     return cursor.fetchall()
 
-def add_post(cursor: Cursor, blog_id: int, post_info: dict[str, str]):
+def add_post(cursor, blog_id: int, post_info: dict[str, str]):
     """Add a post to the database if it isn't already registered."""
     values = (
         blog_id, post_info['title'], post_info['post_url'], post_info.get('content'),
         post_info.get('html'), post_info['date'], utcnow().isoformat()
         )
     cursor.execute(
-        "INSERT OR IGNORE INTO posts (blog_id, title, url, content, html_content, publication_date, discovered_date)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO posts (blog_id, title, url, content, html_content, publication_date, discovered_date)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) 
+        ON CONFLICT (url) DO NOTHING""",
         values
     )
 
-def log_error(cursor: Cursor, blog_id: int, error_type: str, message: str):
+def log_error(cursor, blog_id: int, error_type: str, message: str):
     """Insert an error log entry."""
     cursor.execute(
-        "INSERT INTO error_log (blog_id, timestamp, error_type, message) VALUES (?, ?, ?, ?)",
+        "INSERT INTO error_log (blog_id, timestamp, error_type, message) VALUES (%s, %s, %s, %s)",
         (blog_id, utcnow().isoformat(), error_type, message)
     )
 
@@ -51,7 +44,7 @@ def process_blog(cursor, blog):
     """Run scraper for a single blog and handle results."""
     typer.echo(f"Checking blog '{blog['name']}' (ID {blog['id']})...")
     try:
-        posts = parse_with_config(blog['url'], json.loads(blog['scraping_schema']))
+        posts = parse_post_list(blog['url'], json.loads(blog['scraping_schema']))
     except Exception as e:
         log_error(cursor, blog['id'], 'network', str(e))
         return {'success': 0, 'network': 1, 'parsing': 0}
@@ -64,7 +57,7 @@ def process_blog(cursor, blog):
         except Exception as e:
             log_error(cursor, blog['id'], 'parsing', str(e))
             cursor.execute(
-                "UPDATE blogs SET status = 'Error' WHERE id = ?", (blog['id'],)
+                "UPDATE blogs SET status = %s WHERE id = %s", ('Error', blog['id'])
             )
             typer.echo(typer.style(
                 f"Disabled blog {blog['id']} due to parsing error: {e}",
@@ -85,7 +78,7 @@ def run_check(
 
     # Confirmation if all blogs are asked to be checked
     if blog_id is None:
-        cursor.execute("SELECT COUNT(*) FROM blogs WHERE status = 'Active'")
+        cursor.execute("SELECT COUNT(*) FROM blogs WHERE status = %s", ('Active',))
         total = cursor.fetchone()[0]
         if not yes and not typer.confirm(f"You're about to check {total} blogs. Continue?"):
             typer.echo("Aborted.")
@@ -120,8 +113,8 @@ def view_posts(
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, title, publication_date, url FROM posts WHERE blog_id = ? "
-        "ORDER BY publication_date DESC LIMIT ?", (blog_id, limit)
+        "SELECT id, title, publication_date, url FROM posts WHERE blog_id = %s "
+        "ORDER BY publication_date DESC LIMIT %s", (blog_id, limit)
     )
     posts = cursor.fetchall()
     conn.close()
@@ -144,7 +137,7 @@ def view_post(
     cursor = conn.cursor()
     cursor.execute(
         "SELECT p.title, p.url, p.content, p.html_content, p.publication_date, m.topics, m.reading_time, m.summary "
-        "FROM posts p LEFT JOIN metadata m ON p.id = m.post_id WHERE p.id = ?", (post_id,)
+        "FROM posts p LEFT JOIN metadata m ON p.id = m.post_id WHERE p.id = %s", (post_id,)
     )
     row = cursor.fetchone()
     conn.close()
