@@ -1,6 +1,8 @@
-import os
 import json
-import sys
+import multiprocessing as mp
+import os
+
+from functools import partial
 
 from typing import Annotated, Any
 
@@ -8,14 +10,11 @@ import psycopg2
 import psycopg2.extras
 import typer
 
-from bs4 import BeautifulSoup
-from litellm import completion
-
 from blogregator.blog import blog_cli
 from blogregator.database import get_connection
 from blogregator.parser import parse_post_list
 from blogregator.post import extract_post_metadata
-from blogregator.utils import fetch_with_retries, utcnow
+from blogregator.utils import utcnow
 
 app = typer.Typer()
 app.add_typer(blog_cli, name='blog', help="Commands for managing individual blogs.")
@@ -55,12 +54,45 @@ def add_post(cursor, blog_id: int, post_info: dict[str, str], metadata: dict[str
         [(post_id, topic_id) for topic_id in topic_ids]
     )
 
+
 def log_error(cursor, blog_id: int, error_type: str, message: str):
     """Insert an error log entry."""
     cursor.execute(
         "INSERT INTO error_log (blog_id, timestamp, error_type, message) VALUES (%s, %s, %s, %s)",
         (blog_id, utcnow().isoformat(), error_type, message)
     )
+
+def process_single_post(post, blog_id):
+    local_conn = get_connection()  # Each process needs its own connection
+    local_cursor = local_conn.cursor()
+    local_metrics = {'success': 0, 'network': 0, 'parsing': 0}
+    
+    try:
+        typer.echo(f"Processing post: {post['post_url']}")
+        metadata = extract_post_metadata(post['post_url'])
+        
+        # Add new topics to database if any
+        if metadata.get('new_topic_suggestions'):
+            psycopg2.extras.execute_values(
+                local_cursor,
+                "INSERT INTO topics (name) VALUES %s ON CONFLICT DO NOTHING",
+                [(t,) for t in metadata['new_topic_suggestions']]
+            )
+        
+        # Add the post
+        add_post(local_cursor, blog_id, post, metadata)
+        local_metrics['success'] += 1
+        local_conn.commit()
+    except Exception as e:
+        # Log the error but don't disable the blog immediately
+        # We'll decide whether to disable after all posts are processed
+        log_error(local_cursor, blog_id, 'parsing', str(e))
+        local_metrics['parsing'] += 1
+        # No raise here - we want to keep processing other posts
+    finally:
+        local_conn.close()
+        
+    return local_metrics
 
 def process_blog(conn, blog):
     """Run scraper for a single blog and handle results."""
@@ -82,32 +114,45 @@ def process_blog(conn, blog):
     
     typer.echo(f"Found {len(new_posts)} new posts.")
 
-    for p in new_posts:
-        try:
-            typer.echo(f"Processing post: {p['post_url']}")
-            metadata = extract_post_metadata(p['post_url'])
-            # Check if we have any new topics
-            if metadata.get('new_topic_suggestions'):
-                psycopg2.extras.execute_values(
-                    cursor,
-                    "INSERT INTO topics (name) VALUES %s ON CONFLICT DO NOTHING",
-                    [(t,) for t in metadata['new_topic_suggestions']]
-                )
-            add_post(cursor, blog['id'], p, metadata)
-            metrics['success'] += 1
-            conn.commit()
-        except Exception as e:
-            log_error(cursor, blog['id'], 'parsing', str(e))
-            cursor.execute(
-                "UPDATE blogs SET status = %s WHERE id = %s", ('Error', blog['id'])
-            )
-            typer.echo(typer.style(
-                f"Disabled blog {blog['id']} due to parsing error: {e}",
-                fg=typer.colors.RED
-            ))
-            metrics['parsing'] += 1
-            raise e
+
+    # Determine optimal number of workers based on CPU count and post count
+    max_workers = min(os.cpu_count() or 4, len(new_posts))
+    # Ensure we don't create too many processes for just a few posts
+    if max_workers > 8:
+        max_workers = 8
+    
+    combined_metrics = {'success': 0, 'network': 0, 'parsing': 0}
+    error_encountered = False
+    
+    # Use ProcessPoolExecutor for parallel processing
+    if new_posts:
+        with mp.Pool(processes=max_workers) as pool:
+            # Map the function to process posts in parallel
+            process_func = partial(process_single_post, blog_id=blog['id'])
+            results = list(pool.map(process_func, new_posts))
+            
+            # Combine metrics from all workers
+            for result in results:
+                for key in combined_metrics:
+                    combined_metrics[key] += result[key]
+                if result['parsing'] > 0:
+                    error_encountered = True
+    
+    # Update metrics with combined results
+    metrics.update(combined_metrics)
+    
+    # If any parsing errors occurred, disable the blog
+    if error_encountered:
+        cursor.execute(
+            "UPDATE blogs SET status = %s WHERE id = %s", ('Error', blog['id'])
+        )
+        typer.echo(typer.style(
+            f"Disabled blog {blog['id']} due to parsing errors",
+            fg=typer.colors.RED
+        ))
+    
     return metrics
+
 
 @app.command(name="run-check")
 def run_check(
