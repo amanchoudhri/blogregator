@@ -1,21 +1,18 @@
 import json
 import datetime
-import os
-import time
-import sys
 
 from typing import Annotated
 from urllib.parse import urlparse
 
-import requests
 import typer
 
 from bs4 import BeautifulSoup
-from litellm import completion
 
 from blogregator.database import get_connection
-from blogregator.prompts import GENERATE_JSON_PROMPT, SCHEMA_CORRECTION_PROMPT
+from blogregator.llm import generate_json_from_llm
+from blogregator.prompts import GENERATE_SCHEMA, CORRECT_SCHEMA
 from blogregator.parser import parse_post_list
+from blogregator.utils import fetch_with_retries
 
 blog_cli = typer.Typer(
     name="blog",
@@ -40,58 +37,10 @@ def list_blogs():
         last = r['last_checked'] or 'Never'
         typer.echo(f"{r['id']:<4} {r['name']:<20} {r['status']:<10} {last}")
 
-def fetch_html_body(url, retries=3, sleep=1):
-    """Fetch the HTML <body> content from a URL."""
-    attempts = 0
-    while attempts < retries:
-        try:
-            response = requests.get(url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            })
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
-            return str(soup.body)
-
-        except requests.RequestException as e:
-            print(f"Error fetching the URL: {e}")
-            attempts += 1
-            time.sleep(sleep)
-    raise requests.RequestException(f'Unable to retrieve content from page: {url}')
-
-def _get_json_from_llm(prompt: str) -> dict:
-    """Helper function to get JSON output from LLM with error handling."""
-    try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            print("Error: GEMINI_API_KEY environment variable is not set")
-            sys.exit(1)
-            
-        response = completion(
-            model="gemini/gemini-2.0-flash",
-            messages=[{"role": "user", "content": prompt}],
-            api_key=api_key
-        )
-        
-        # Extract the generated json from the response
-        result: str = response.choices[0].message.content # type: ignore
-        
-        # Clean up the response - remove markdown code blocks if present
-        if "```json" in result:
-            result = result.split("```json")[1]
-            if "```" in result:
-                result = result.split("```")[0]
-                
-        # Parse to JSON
-        return json.loads(result)
-        
-    except Exception as e:
-        print(f"Error generating JSON from LLM: {e}")
-        raise
-
 def generate_schema(html_content, url):
     """Use Gemini to generate a parser function for the blog."""
-    formatted_prompt = GENERATE_JSON_PROMPT.format(html_content=html_content, blog_url=url)
-    return _get_json_from_llm(formatted_prompt)
+    formatted_prompt = GENERATE_SCHEMA.format(html_content=html_content, blog_url=url)
+    return generate_json_from_llm(formatted_prompt)
 
 def get_domain_name(url: str) -> str:
     """
@@ -139,7 +88,8 @@ def add_blog(
 
     # TODO: error handling
     typer.echo('Fetching HTML content...')
-    body = fetch_html_body(url)
+    content = fetch_with_retries(url).content
+    body = str(BeautifulSoup(content, 'html.parser').body)
 
     typer.echo('Generating parser function...')
 
@@ -188,7 +138,7 @@ def add_blog(
             previous_results.append(result)
         
         # Generate a new schema using the correction prompt
-        formatted_prompt = SCHEMA_CORRECTION_PROMPT.format(
+        formatted_prompt = CORRECT_SCHEMA.format(
             previous_schema=json.dumps(schema, indent=2),
             previous_results="\n\n".join(previous_results),
             blog_url=url,

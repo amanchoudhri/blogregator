@@ -1,4 +1,4 @@
-GENERATE_JSON_PROMPT = """
+GENERATE_SCHEMA = """
 You are an expert web scraping assistant. Your task is to analyze the provided HTML content of a blog's main listing page and generate a JSON configuration object that can be used to extract blog post information.
 
 The JSON configuration object must follow this schema:
@@ -66,7 +66,7 @@ HTML <body> content:
 Provide ONLY the JSON configuration object. Do not include any other text, explanations, or markdown formatting around the JSON.
 """
 
-SCHEMA_CORRECTION_PROMPT = """
+CORRECT_SCHEMA = """
 You are an expert web scraping assistant. Your task is to analyze the provided HTML content of a blog's main listing page and improve an existing JSON configuration object that can be used to extract blog post information.
 
 The JSON configuration object must follow this schema:

@@ -5,6 +5,8 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from typing import List, Dict, Any, Optional
 
+from blogregator.utils import fetch_with_retries
+
 def parse_post_list(page_url: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Extracts blog post data from a given URL using a JSON configuration object.
@@ -26,12 +28,7 @@ def parse_post_list(page_url: str, config: Dict[str, Any]) -> List[Dict[str, Any
         contains 'title', 'post_url', and 'date' for a post.
         Returns an empty list if fetching fails or no posts are found.
     """
-    try:
-        response = requests.get(page_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        print(f"Error fetching the URL {page_url}: {e}")
-        return []
+    response = fetch_with_retries(page_url)
 
     soup = BeautifulSoup(response.text, 'html.parser')
     
