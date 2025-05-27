@@ -12,6 +12,7 @@ import typer
 
 from blogregator.blog import blog_cli
 from blogregator.database import get_connection
+from blogregator.email import notify
 from blogregator.parser import parse_post_list
 from blogregator.post import extract_post_metadata, post_cli
 from blogregator.utils import utcnow
@@ -19,6 +20,20 @@ from blogregator.utils import utcnow
 app = typer.Typer()
 app.add_typer(blog_cli, name='blog', help="Commands for managing blogs.")
 app.add_typer(post_cli, name='post', help="Commands for managing posts.")
+
+@app.command(name='send-newsletter')
+def send_newsletter(hour_window: Annotated[int, typer.Option(help="Number of hours to look back for new posts")] = 8):
+    """Send an email with new posts discovered in the last hour_window hours."""
+    typer.echo(f"Looking for posts from the past {hour_window} hours...")
+    try:
+        n_posts = notify(hour_window)
+        if n_posts == 0:
+            typer.echo("No new posts found.")
+            return
+        else:
+            typer.echo(typer.style(f"Newsletter with {n_posts} posts sent successfully", fg=typer.colors.GREEN))
+    except Exception as e:
+        typer.echo(typer.style(f"Failed to send newsletter: {e}", fg=typer.colors.RED))
 
 def fetch_blogs(cursor, blog_id: int | None):
     """Retrieve active blogs or a specific blog by ID."""
