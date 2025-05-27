@@ -1,11 +1,20 @@
 import datetime
 
-import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 from blogregator.utils import fetch_with_retries
+
+def parse_date(date_str: str, format: str, alternate_formats: List[str] = []) -> str | None:
+    try:
+        return datetime.datetime.strptime(date_str, format).isoformat()
+    except ValueError:
+        for alt_format in alternate_formats:
+            try:
+                return datetime.datetime.strptime(date_str, alt_format).isoformat()
+            except ValueError:
+                pass
 
 def parse_post_list(page_url: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -86,7 +95,9 @@ def parse_post_list(page_url: str, config: Dict[str, Any]) -> List[Dict[str, Any
                        value and not value.startswith(('http://', 'https://', '#')):
                         value = urljoin(page_url, value)
                 if field_name == "date":
-                    value = datetime.datetime.strptime(value, field_spec['format']).isoformat()
+                    value = parse_date(
+                        value, field_spec['format'], field_spec.get('alternate_formats', [])
+                    )
                 post_data[field_name] = value
             
         # Basic validation: ensure we have at least a title and URL for it to be a useful entry

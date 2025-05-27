@@ -85,6 +85,7 @@ The JSON configuration object must follow this schema:
       "selector": "CSS_SELECTOR_FOR_DATE_WITHIN_POST_ITEM",
       "attribute": "OPTIONAL_ATTRIBUTE_NAME", // e.g., "datetime" if date is in an attribute, otherwise null to get text
       "format": "STRPTIME_FORMAT_STRING" // Python strptime format string
+      "alternate_formats": ["STRPTIME_FORMAT_STRING", ...] // Optional, fallback Python strptime format strings
     }}
   }}
 }}
@@ -118,6 +119,7 @@ Explanation of fields:
                 *   For "15 Jan 2023 14:30", use `"%d %b %Y %H:%M"`.
                 *   For "2023/12/25", use `"%Y/%m/%d"`.
             *   Ensure the format string accurately matches the date representation on the page.
+            *   If the dates are formatted inconsistently, provide any alternate format strings in the `alternate_formats` array.
 
 General Instructions:
 *   Provide robust CSS selectors. Prefer selectors that are less likely to break with minor site redesigns, but are still specific enough.
@@ -132,6 +134,12 @@ Previous Schema Attempt:
 
 Results of Previous Attempt:
 {previous_results}
+
+Error (if any):
+{error}
+
+User Feedback (if provided):
+{user_feedback}
 
 Blog Page URL: {blog_url}
 HTML <body> content:

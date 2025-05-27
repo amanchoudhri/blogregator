@@ -1,7 +1,7 @@
 import json
 import datetime
 
-from typing import Annotated
+from typing import Annotated, List, Dict, Any, Optional
 from urllib.parse import urlparse
 
 import typer
@@ -61,6 +61,64 @@ def get_domain_name(url: str) -> str:
     
     return main_domain
 
+def format_post_date(post: Dict[str, Any]) -> Optional[str]:
+    """Format the post date consistently."""
+    pub_date = post.get('date')
+    if not pub_date:
+        return None
+    
+    try:
+        return datetime.datetime.strptime(pub_date, '%Y-%m-%d').strftime('%Y-%m-%d')
+    except:
+        return pub_date
+
+def format_post_for_display(post: Dict[str, Any], index: int) -> str:
+    """Format a single post for display in the console."""
+    result = f"Post {index}:\n"
+    result += f"Title: {post.get('title', 'No title found')}\n"
+    result += f"URL: {post.get('post_url', 'No URL found')}\n"
+    
+    pub_date = format_post_date(post)
+    if pub_date:
+        result += f"Date: {pub_date}\n"
+    
+    return result
+
+def display_posts(posts: List[Dict[str, Any]], message: str = "Found posts:") -> None:
+    """Display posts in a consistent format."""
+    typer.echo(f"\n{message}")
+    for i, post in enumerate(posts, 1):
+        typer.echo(f"\nPost {i}:")
+        typer.echo(f"Title: {post.get('title', 'No title found')}")
+        typer.echo(f"URL: {post.get('post_url', 'No URL found')}")
+        
+        pub_date = format_post_date(post)
+        if pub_date:
+            typer.echo(f"Date: {pub_date}")
+
+def save_blog_to_database(conn, name, url, schema, status='Active'):
+    """Save the blog information to the database.
+    
+    Args:
+        conn: Database connection
+        name: Blog name
+        url: Blog URL
+        schema: Scraping schema (JSON)
+        status: Blog status ('Active', 'Error', etc.)
+    """
+    typer.echo(f'Saving blog to database with status: {status}...')
+    
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT INTO blogs (name, url, scraping_schema, status)
+        VALUES (%s, %s, %s, %s)""",
+        (name, url, json.dumps(schema), status)
+    )
+    conn.commit()
+    conn.close()
+    
+    typer.echo(f"Successfully added blog: {name} ({url})")
+
 @blog_cli.command("add")
 def add_blog(
         url: Annotated[str, typer.Argument(help="The URL of the blog to add.")],
@@ -78,7 +136,7 @@ def add_blog(
         if not typer.confirm(f"Blog with URL {url} already exists. Overwrite?"):
             conn.close()
             return
-        cursor.execute("DELETE FROM blogs WHERE url = ?", (url,))
+        cursor.execute("DELETE FROM blogs WHERE url = %s", (url,))
         conn.commit()
     
     typer.echo(f'Adding blog: {url}')
@@ -98,95 +156,79 @@ def add_blog(
     typer.echo(schema)
     typer.echo('-----------------')
     
-    # Get and display parsed posts
-    posts = parse_post_list(url, schema)
+    # First attempt: Parse posts with the initial schema
+    first_attempt_success = False
+    error = ""
+    posts = []
     
-    if not posts:
-        typer.echo("No posts were found using the generated schema.")
-        conn.close()
-        return
+    try:
+        posts = parse_post_list(url, schema)
+        if posts:
+            first_attempt_success = True
+            display_posts(posts, "Found posts using the generated schema:")
+        else:
+            typer.echo("No posts were found using the generated schema.")
+    except Exception as e:
+        typer.echo(f"Failed to parse posts: {e}")
+        error = str(e)
     
-    typer.echo("\nFound posts using the generated schema:")
-    for i, post in enumerate(posts, 1):
-        typer.echo(f"\nPost {i}:")
-        typer.echo(f"Title: {post.get('title', 'No title found')}")
-        typer.echo(f"URL: {post.get('post_url', 'No URL found')}")
-        pub_date = post.get('date')
-        if pub_date:
-            try:
-                pub_date = datetime.datetime.strptime(pub_date, '%Y-%m-%d').strftime('%Y-%m-%d')
-            except:
-                pass
-            typer.echo(f"Date: {pub_date}")
-        
-    if not typer.confirm("\nDoes this look correct? (If not, the schema will need to be adjusted)"):
-        typer.echo("Previous schema didn't work well. Let's try generating a better one...")
-        
-        # Format the previous results for display
-        previous_results = []
-        for i, post in enumerate(posts, 1):
-            result = f"Post {i}:\n"
-            result += f"Title: {post.get('title', 'No title found')}\n"
-            result += f"URL: {post.get('post_url', 'No URL found')}\n"
-            pub_date = post.get('date')
-            if pub_date:
-                try:
-                    pub_date = datetime.datetime.strptime(pub_date, '%Y-%m-%d').strftime('%Y-%m-%d')
-                except:
-                    pass
-                result += f"Date: {pub_date}\n"
-            previous_results.append(result)
-        
-        # Generate a new schema using the correction prompt
-        formatted_prompt = CORRECT_SCHEMA.format(
-            previous_schema=json.dumps(schema, indent=2),
-            previous_results="\n\n".join(previous_results),
-            blog_url=url,
-            html_content=body
-        )
-        
-        try:
-            schema = _get_json_from_llm(formatted_prompt)
-            
-            typer.echo("\nTrying the improved schema...")
-            posts = parse_post_list(url, schema)
-            
-            if not posts:
-                typer.echo("Still no posts found. Please manually adjust the schema and try again.")
-                conn.close()
-                return
-            
-            typer.echo("\nFound posts using the improved schema:")
-            for i, post in enumerate(posts, 1):
-                typer.echo(f"\nPost {i}:")
-                typer.echo(f"Title: {post.get('title', 'No title found')}")
-                typer.echo(f"URL: {post.get('post_url', 'No URL found')}")
-                pub_date = post.get('date')
-                if pub_date:
-                    try:
-                        pub_date = datetime.datetime.strptime(pub_date, '%Y-%m-%d').strftime('%Y-%m-%d')
-                    except:
-                        pass
-                    typer.echo(f"Date: {pub_date}")
-            
-            if not typer.confirm("\nDoes this look better? If not, you'll need to manually adjust the schema."):
-                typer.echo("Aborting blog addition. Please refine the schema and try again.")
-                conn.close()
-                return
-            
-        except Exception as e:
-            print(f"Error generating improved schema: {e}")
-            typer.echo("Failed to generate an improved schema. Please manually adjust the schema and try again.")
-            conn.close()
+    # If first attempt was successful, ask for confirmation
+    if first_attempt_success:
+        if typer.confirm("\nDoes this look correct?"):
+            save_blog_to_database(conn, name, url, schema)
             return
+        
+    user_feedback = typer.prompt("Please provide feedback on what went wrong")
     
-    typer.echo('Saving parser function to file...')
+    # If we get here, we need to try to improve the schema
+    typer.echo("Attempting to generate an improved schema...")
+    
+    # Format the previous results for display (if any)
+    previous_results = []
+    if posts:
+        previous_results = [format_post_for_display(post, i) for i, post in enumerate(posts, 1)]
+    
+    # Generate a new schema using the correction prompt
+    formatted_prompt = CORRECT_SCHEMA.format(
+        previous_schema=json.dumps(schema, indent=2),
+        previous_results="\n\n".join(previous_results),
+        blog_url=url,
+        html_content=body,
+        error=error,
+        user_feedback=user_feedback
+    )
+    
+    # Second attempt: Try with an improved schema
+    improved_schema = None
+    improved_posts = []
+    
+    try:
+        improved_schema = generate_json_from_llm(formatted_prompt)
 
-    typer.echo('Adding blog to database...')
-    cursor.execute(
-        """INSERT INTO blogs (name, url, scraping_schema, status)
-        VALUES (%s, %s, %s, %s)""",
-        (name, url, json.dumps(schema), 'Inactive')
-            )
-    conn.commit()
+        typer.echo('Improved JSON Schema -----')
+        typer.echo(improved_schema)
+        typer.echo('-----------------')
+
+        typer.echo("\nTrying the improved schema...")
+        
+        improved_posts = parse_post_list(url, improved_schema)
+        if improved_posts:
+            display_posts(improved_posts, "Found posts using the improved schema:")
+        else:
+            typer.echo("Still no posts found with the improved schema.")
+    except Exception as e:
+        typer.echo(f"Error with improved schema: {e}")
+    
+    # If we got an improved schema (even if it had errors), ask if user wants to save it
+    if improved_schema:
+        status = 'Active' if improved_posts else "Error"
+        save_blog_to_database(conn, name, url, improved_schema, status=status)
+    else:
+        # No improved schema was generated
+        typer.echo("Failed to generate an improved schema.")
+        if typer.confirm("\nSave the original schema with an error status?"):
+            save_blog_to_database(conn, name, url, schema, status="Error")
+        else:
+            typer.echo("Aborting blog addition. No schema saved.")
+            conn.close()
     conn.close()
