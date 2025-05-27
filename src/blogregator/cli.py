@@ -13,11 +13,12 @@ import typer
 from blogregator.blog import blog_cli
 from blogregator.database import get_connection
 from blogregator.parser import parse_post_list
-from blogregator.post import extract_post_metadata
+from blogregator.post import extract_post_metadata, post_cli
 from blogregator.utils import utcnow
 
 app = typer.Typer()
-app.add_typer(blog_cli, name='blog', help="Commands for managing individual blogs.")
+app.add_typer(blog_cli, name='blog', help="Commands for managing blogs.")
+app.add_typer(post_cli, name='post', help="Commands for managing posts.")
 
 def fetch_blogs(cursor, blog_id: int | None):
     """Retrieve active blogs or a specific blog by ID."""
@@ -30,7 +31,6 @@ def fetch_blogs(cursor, blog_id: int | None):
 
 def add_post(cursor, blog_id: int, post_info: dict[str, str], metadata: dict[str, Any]):
     """Add a post to the database if it isn't already registered."""
-    print(metadata)
     cursor.execute(
         """INSERT INTO posts (blog_id, title, url, publication_date, reading_time, summary)
         VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
@@ -41,12 +41,10 @@ def add_post(cursor, blog_id: int, post_info: dict[str, str], metadata: dict[str
     )
     post_id = cursor.fetchone()['id']
     topics = metadata.get('matched_topics', []) + metadata.get('new_topic_suggestions', [])
-    print(topics)
 
     # get the IDs of each topic
     cursor.execute("SELECT id FROM topics WHERE name = ANY(%s)", (topics,))
     topic_ids = [row['id'] for row in cursor.fetchall()]
-    print(topic_ids)
 
     psycopg2.extras.execute_values(
         cursor,
@@ -191,58 +189,7 @@ def run_check(
     conn.close()
 
 
-@app.command(name="view-posts")
-def view_posts(
-    blog_id: int = typer.Argument(..., help="ID of the blog"),
-    limit: int = typer.Option(10, "-n", help="Max number of posts to display")
-):
-    """View recent posts for a specific blog."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, title, publication_date, url FROM posts WHERE blog_id = %s "
-        "ORDER BY publication_date DESC LIMIT %s", (blog_id, limit)
-    )
-    posts = cursor.fetchall()
-    conn.close()
 
-    if not posts:
-        typer.echo("No posts found for this blog.")
-        return
-
-    typer.echo(f"{'Post ID':<8} {'Published':<20} {'Title'}")
-    for p in posts:
-        pub = p['publication_date']
-        typer.echo(f"{p['id']:<8} {pub:<20} {p['title']}")
-
-@app.command(name="view-post")
-def view_post(
-    post_id: int = typer.Argument(..., help="ID of the post to view")
-):
-    """View detailed information for a single post."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT p.title, p.url, p.content, p.html_content, p.publication_date, m.topics, m.reading_time, m.summary "
-        "FROM posts p LEFT JOIN metadata m ON p.id = m.post_id WHERE p.id = %s", (post_id,)
-    )
-    row = cursor.fetchone()
-    conn.close()
-
-    if not row:
-        typer.echo("Post not found.")
-        return
-
-    typer.echo(typer.style(row['title'], bold=True))
-    typer.echo(f"URL: {row['url']}")
-    typer.echo(f"Published: {row['publication_date']}")
-    typer.echo("\nContent:\n" + (row['content'] or "[No content]"))
-    if row['topics']:
-        typer.echo(f"\nTopics: {row['topics']}")
-    if row['reading_time']:
-        typer.echo(f"Reading time: {row['reading_time']} min")
-    if row['summary']:
-        typer.echo("\nSummary:\n" + row['summary'])
 
 if __name__ == "__main__":
     app()

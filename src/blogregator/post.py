@@ -1,8 +1,85 @@
+from typing import Any, Mapping
+
+import typer
+
 from bs4 import BeautifulSoup
 
 from blogregator.database import get_connection
 from blogregator.llm import generate_json_from_llm
 from blogregator.utils import fetch_with_retries
+
+post_cli = typer.Typer(
+    name="post",
+    help="Manage and view blog posts."
+)
+
+@post_cli.command(name="view")
+def view_post(
+    post_id: int = typer.Argument(..., help="ID of the post to view")
+):
+    """View detailed information for a single post."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT 
+            p.id,
+            p.title, 
+            p.url, 
+            p.publication_date, 
+            p.reading_time, 
+            p.summary,
+            STRING_AGG(t.name, ', ' ORDER BY t.name) as topics
+        FROM posts p
+        LEFT JOIN post_topics tp ON p.id = tp.post_id
+        LEFT JOIN topics t ON t.id = tp.topic_id
+        WHERE p.id = %s
+        GROUP BY p.id;
+        """, (post_id,)
+    )
+
+    row: Mapping[str, Any] = cursor.fetchone() # type: ignore
+    conn.close()
+
+    if not row:
+        typer.echo("Post not found.")
+        return
+
+    typer.echo(typer.style(row['title'], bold=True))
+    typer.echo(f"URL: {row['url']}")
+    typer.echo(f"Published: {row['publication_date']}")
+    if row.get('topics'):
+        typer.echo(f"\nTopics: {row['topics']}")
+    if row.get('reading_time'):
+        typer.echo(f"Reading time: {row['reading_time']} min")
+    if row.get('summary'):
+        typer.echo("\nSummary:\n" + row['summary'])
+
+@post_cli.command(name="list")
+def list_posts(
+    blog_id: int = typer.Argument(..., help="ID of the blog"),
+    limit: int = typer.Option(10, "-n", help="Max number of posts to display")
+):
+    """View recent posts for a specific blog."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, title, publication_date, url FROM posts WHERE blog_id = %s "
+        "ORDER BY publication_date DESC LIMIT %s", (blog_id, limit)
+    )
+    posts: list[Mapping[str, Any]] = cursor.fetchall() # type: ignore
+    conn.close()
+
+    if not posts:
+        typer.echo("No posts found for this blog.")
+        return
+
+    typer.echo(typer.style(f"{'ID':<4} {'Published':<12} {'Title'}", bold=True))
+    for p in posts:
+        if p.get('publication_date'):
+            pub = p['publication_date'].strftime('%Y-%m-%d')
+        else:
+            pub = ""
+        typer.echo(f"{p['id']:<4} {pub:<12} {p['title']}")
 
 def extract_post_metadata(post_url: str, model: str = "gemini/gemini-2.5-flash-preview-05-20") -> dict:
     """Extract post metadata."""
