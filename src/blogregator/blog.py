@@ -96,7 +96,7 @@ def display_posts(posts: List[Dict[str, Any]], message: str = "Found posts:") ->
         if pub_date:
             typer.echo(f"Date: {pub_date}")
 
-def save_blog_to_database(conn, name, url, schema, status='Active'):
+def save_blog_to_database(conn, name, url, schema, status='Active', update_existing=False):
     """Save the blog information to the database.
     
     Args:
@@ -105,19 +105,29 @@ def save_blog_to_database(conn, name, url, schema, status='Active'):
         url: Blog URL
         schema: Scraping schema (JSON)
         status: Blog status ('Active', 'Error', etc.)
+        update_existing: If True, update existing blog instead of inserting new one
     """
     typer.echo(f'Saving blog to database with status: {status}...')
     
     cursor = conn.cursor()
-    cursor.execute(
-        """INSERT INTO blogs (name, url, scraping_schema, status)
-        VALUES (%s, %s, %s, %s)""",
-        (name, url, json.dumps(schema), status)
-    )
-    conn.commit()
-    conn.close()
     
-    typer.echo(f"Successfully added blog: {name} ({url})")
+    if update_existing:
+        cursor.execute(
+            """UPDATE blogs 
+            SET name = %s, scraping_schema = %s, status = %s
+            WHERE url = %s""",
+            (name, json.dumps(schema), status, url)
+        )
+        typer.echo(f"Successfully updated blog: {name} ({url})")
+    else:
+        cursor.execute(
+            """INSERT INTO blogs (name, url, scraping_schema, status)
+            VALUES (%s, %s, %s, %s)""",
+            (name, url, json.dumps(schema), status)
+        )
+        typer.echo(f"Successfully added blog: {name} ({url})")
+    
+    conn.commit()
 
 @blog_cli.command("add")
 def add_blog(
@@ -136,8 +146,10 @@ def add_blog(
         if not typer.confirm(f"Blog with URL {url} already exists. Overwrite?"):
             conn.close()
             return
-        cursor.execute("DELETE FROM blogs WHERE url = %s", (url,))
-        conn.commit()
+        typer.echo(f"Updating existing blog: {url}")
+        update_existing = True
+    else:
+        update_existing = False
     
     typer.echo(f'Adding blog: {url}')
 
@@ -175,7 +187,7 @@ def add_blog(
     # If first attempt was successful, ask for confirmation
     if first_attempt_success:
         if typer.confirm("\nDoes this look correct?"):
-            save_blog_to_database(conn, name, url, schema)
+            save_blog_to_database(conn, name, url, schema, update_existing=update_existing)
             return
         
     user_feedback = typer.prompt("Please provide feedback on what went wrong")
@@ -222,12 +234,12 @@ def add_blog(
     # If we got an improved schema (even if it had errors), ask if user wants to save it
     if improved_schema:
         status = 'Active' if improved_posts else "Error"
-        save_blog_to_database(conn, name, url, improved_schema, status=status)
+        save_blog_to_database(conn, name, url, improved_schema, status=status, update_existing=update_existing)
     else:
         # No improved schema was generated
         typer.echo("Failed to generate an improved schema.")
         if typer.confirm("\nSave the original schema with an error status?"):
-            save_blog_to_database(conn, name, url, schema, status="Error")
+            save_blog_to_database(conn, name, url, schema, status="Error", update_existing=update_existing)
         else:
             typer.echo("Aborting blog addition. No schema saved.")
             conn.close()
