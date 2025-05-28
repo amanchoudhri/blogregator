@@ -12,3 +12,16 @@ def get_connection():
             cursor_factory=psycopg2.extras.RealDictCursor 
             )
     return conn
+
+def init_database(sql_file: str = "sql/schema.sql"):
+    """Initialize the database by creating tables from a schema file."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        with open(sql_file, 'r') as f:
+            cursor.execute(f.read())
+        conn.commit()
+    except Exception as e:
+        raise e
+    finally:
+        conn.close()
