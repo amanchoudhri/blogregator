@@ -1,13 +1,46 @@
 # blogregator
 
-There are so many great blogs out there, especially
-in AI and ML, but many don't have RSS feeds. So I built Blogregator to help me keep track of
-the latest ideas from authors I trust.
+There are so many great blogs out there,
+but it's hard to stay up to date—especially because many don't have RSS feeds. So I built Blogregator to help me keep track of
+the latest posts from blogs I follow.
 
 Blogregator is a tool for automatically scraping blogs, extracting metadata from posts, and updating you when a new post drops.
 
-![A Blogregator email newsletter showing new posts](images/email-example.png)
+<div align="center">
+<img src="images/email-example.png" alt="A Blogregator email newsletter showing new posts" width="400">
+</div>
 
+Currently, I'm using it to monitor 7 blogs, and it has **already successfully processed over 400 posts** with 100% schema generation success rate.
+
+## Demo
+Adding blogs, checking for new posts, and sending newsletters is straightforward.
+```bash
+# LLM automatically generates scraping schema for any blog format
+$ blogregator blog add https://example-blog.com
+Fetching HTML content...
+Generating parser function...
+Found posts using the generated schema:
+
+Post 1:
+Title: How to Build Better ML Pipelines
+URL: https://example-blog.com/ml-pipelines
+Date: 2025-05-28
+
+Does this look correct? [y/N]: y
+Successfully added blog: example-blog (https://example-blog.com)
+
+# Automated checks find new posts
+$ blogregator run-check
+Checking blog 'example-blog' (ID 1)...
+Found 1 new posts.
+Processing post: https://example-blog.com/example-article-2025-05-28
+Done. Posts added: 1, network errors: 0, parsing errors: 0
+
+# And collect them into a clean email newsletter
+$ blogregator send-newsletter
+Looking for posts from the past 8 hours...
+Newsletter with 1 posts sent successfully
+```
 
 ## How It Works
 
