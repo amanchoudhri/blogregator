@@ -10,7 +10,7 @@ Blogregator is a tool for automatically scraping blogs, extracting metadata from
 <img src="images/email-example.png" alt="A Blogregator email newsletter showing new posts" width="400">
 </div>
 
-Currently, I'm using it to monitor 7 blogs, and it has **already successfully processed over 400 posts** with 100% schema generation success rate.
+Currently, I'm using it to monitor 10+ blogs, and it has **already successfully processed over 400 posts** with 100% schema generation success rate.
 
 ## Demo
 Adding blogs, checking for new posts, and sending newsletters is straightforward.
