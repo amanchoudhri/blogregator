@@ -123,13 +123,18 @@ def extract_post_text(html_content: str) -> str:
     soup = BeautifulSoup(html_content, 'html.parser')
 
     # Find the main article content. The <article> tag is a strong semantic indicator.
-    # If it doesn't exist, fall back to the main role, and finally the whole body.
-    article_body = soup.find('article')
-    if not article_body:
+    # If it doesn't exist (or if there are multiple), fall back to the main role, and finally the whole body.
+    article_tag_instances = soup.find_all('article')
+    article_body = article_tag_instances[0] if article_tag_instances else None
+    if (article_body is None) or (len(article_tag_instances) > 1):
         article_body = soup.find(attrs={'role': 'main'})
-    if not article_body:
-        article_body = soup.body
 
+    if article_body is None:
+        if soup.body is not None:
+            article_body = soup.body
+        else:
+            return "Unable to parse post content."
+        
     # Remove common non-content elements to clean up the text
     for tag_to_remove in article_body(['nav', 'aside', 'header', 'footer', 'script', 'style']):
         tag_to_remove.decompose()
