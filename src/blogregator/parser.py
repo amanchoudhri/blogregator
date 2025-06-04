@@ -2,7 +2,7 @@ import datetime
 
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from typing import List, Dict, Any
+from typing import List, Any, Optional
 
 from blogregator.utils import fetch_with_retries
 
@@ -16,13 +16,13 @@ def parse_date(date_str: str, format: str, alternate_formats: List[str] = []) ->
             except ValueError:
                 pass
 
-def parse_post_list(page_url: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+def parse_post_list(page_url: str, config: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Extracts blog post data from a given URL using a JSON configuration object.
 
     Args:
         page_url (str): URL of the blog's main/listing page.
-        config (Dict[str, Any]): A JSON-like dictionary defining the selectors:
+        config (dict[str, Any]): A JSON-like dictionary defining the selectors:
             {
               "post_item_selector": "CSS_SELECTOR_FOR_EACH_POST_ITEM",
               "fields": {
@@ -33,7 +33,7 @@ def parse_post_list(page_url: str, config: Dict[str, Any]) -> List[Dict[str, Any
             }
 
     Returns:
-        List[Dict[str, Any]]: A list of dictionaries, where each dictionary
+        list[dict[str, Any]]: A list of dictionaries, where each dictionary
         contains 'title', 'post_url', and 'date' for a post.
         Returns an empty list if fetching fails or no posts are found.
     """
@@ -57,9 +57,9 @@ def parse_post_list(page_url: str, config: Dict[str, Any]) -> List[Dict[str, Any
         print(f"No post elements found using selector '{post_item_selector}' on {page_url}.")
         return []
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for post_element in post_elements:
-        post_data: Dict[str, Optional[str]] = {
+        post_data: dict[str, Optional[str]] = {
             "title": None,
             "post_url": None,
             "date": None
