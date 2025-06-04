@@ -1,5 +1,8 @@
-import time
 import datetime
+import os
+import subprocess
+import tempfile
+import time
 
 import requests
 
@@ -22,3 +25,30 @@ def fetch_with_retries(url, retries=3, sleep=1):
             attempts += 1
             time.sleep(sleep)
     raise requests.RequestException(f'Unable to retrieve content from page: {url}')
+
+def multiline_user_input(initial_message: str = ""):
+    """
+    Opens an editor and returns the user's input.
+    
+    Args:
+        initial_message: The initial message to display in the editor.
+    
+    Returns:
+        The user's input as a string, or None if an error occurs.
+    """
+    editor = os.environ.get("EDITOR", "nano")
+    
+    with tempfile.NamedTemporaryFile('w+', suffix='.tmp', delete=False) as tf:
+        if initial_message:
+            tf.write(initial_message)
+            tf.flush()
+        temp_filename = tf.name
+    try:
+        subprocess.call((editor, temp_filename))
+        with open(temp_filename, 'r') as f:
+            return f.read()
+    except Exception as e:
+        print(f"Error opening editor: {e}")
+        return None
+    finally:
+        os.remove(temp_filename)

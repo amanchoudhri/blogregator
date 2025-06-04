@@ -11,11 +11,10 @@ import psycopg2.extras
 import typer
 
 from blogregator.blog import blog_cli
-from blogregator.database import get_connection, init_database
-from blogregator.email import notify
+from blogregator.database import get_connection, init_database, log_error
+from blogregator.emails import notify
 from blogregator.parser import parse_post_list
-from blogregator.post import extract_post_metadata, post_cli
-from blogregator.utils import utcnow
+from blogregator.post import post_cli, process_single_post
 
 app = typer.Typer()
 app.add_typer(blog_cli, name='blog', help="Commands for managing blogs.")
@@ -52,69 +51,6 @@ def fetch_blogs(cursor, blog_id: int | None):
         cursor.execute("SELECT * FROM blogs WHERE status = %s", ('Active',))
     return cursor.fetchall()
 
-
-def add_post(cursor, blog_id: int, post_info: dict[str, str], metadata: dict[str, Any]):
-    """Add a post to the database if it isn't already registered."""
-    cursor.execute(
-        """INSERT INTO posts (blog_id, title, url, publication_date, reading_time, summary)
-        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
-        (
-            blog_id, post_info['title'], post_info['post_url'], post_info['date'],
-            metadata['reading_time'], metadata['summary']
-        )
-    )
-    post_id = cursor.fetchone()['id']
-    topics = metadata.get('matched_topics', []) + metadata.get('new_topic_suggestions', [])
-
-    # get the IDs of each topic
-    cursor.execute("SELECT id FROM topics WHERE name = ANY(%s)", (topics,))
-    topic_ids = [row['id'] for row in cursor.fetchall()]
-
-    psycopg2.extras.execute_values(
-        cursor,
-        """INSERT INTO post_topics (post_id, topic_id) VALUES %s ON CONFLICT DO NOTHING""",
-        [(post_id, topic_id) for topic_id in topic_ids]
-    )
-
-
-def log_error(cursor, blog_id: int, error_type: str, message: str):
-    """Insert an error log entry."""
-    cursor.execute(
-        "INSERT INTO error_log (blog_id, timestamp, error_type, message) VALUES (%s, %s, %s, %s)",
-        (blog_id, utcnow().isoformat(), error_type, message)
-    )
-
-def process_single_post(post, blog_id):
-    local_conn = get_connection()  # Each process needs its own connection
-    local_cursor = local_conn.cursor()
-    local_metrics = {'success': 0, 'network': 0, 'parsing': 0}
-    
-    try:
-        typer.echo(f"Processing post: {post['post_url']}")
-        metadata = extract_post_metadata(post['post_url'])
-        
-        # Add new topics to database if any
-        if metadata.get('new_topic_suggestions'):
-            psycopg2.extras.execute_values(
-                local_cursor,
-                "INSERT INTO topics (name) VALUES %s ON CONFLICT DO NOTHING",
-                [(t,) for t in metadata['new_topic_suggestions']]
-            )
-        
-        # Add the post
-        add_post(local_cursor, blog_id, post, metadata)
-        local_metrics['success'] += 1
-        local_conn.commit()
-    except Exception as e:
-        # Log the error but don't disable the blog immediately
-        # We'll decide whether to disable after all posts are processed
-        log_error(local_cursor, blog_id, 'parsing', str(e))
-        local_metrics['parsing'] += 1
-        # No raise here - we want to keep processing other posts
-    finally:
-        local_conn.close()
-        
-    return local_metrics
 
 def process_blog(conn, blog):
     """Run scraper for a single blog and handle results."""

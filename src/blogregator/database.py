@@ -3,6 +3,8 @@ import os
 import psycopg2
 import psycopg2.extras
 
+from blogregator.utils import utcnow
+
 def get_connection():
     database_url = os.environ.get('DATABASE_URL')
     if not database_url:
@@ -25,3 +27,11 @@ def init_database(sql_file: str = "sql/schema.sql"):
         raise e
     finally:
         conn.close()
+        
+
+def log_error(cursor, blog_id: int, error_type: str, message: str):
+    """Insert an error log entry."""
+    cursor.execute(
+        "INSERT INTO error_log (blog_id, timestamp, error_type, message) VALUES (%s, %s, %s, %s)",
+        (blog_id, utcnow().isoformat(), error_type, message)
+    )

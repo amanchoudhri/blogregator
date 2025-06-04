@@ -4,9 +4,12 @@ import typer
 
 from bs4 import BeautifulSoup
 
-from blogregator.database import get_connection
+import psycopg2
+import psycopg2.extras
+
+from blogregator.database import get_connection, log_error
 from blogregator.llm import generate_json_from_llm
-from blogregator.utils import fetch_with_retries
+from blogregator.utils import fetch_with_retries, multiline_user_input
 
 post_cli = typer.Typer(
     name="post",
@@ -80,14 +83,114 @@ def list_posts(
         else:
             pub = ""
         typer.echo(f"{p['id']:<4} {pub:<12} {p['title']}")
+        
+@post_cli.command(name="reparse")
+def reparse_post(
+    url: str = typer.Argument(help="URL of the post to reparse"),
+    manually_paste_content: bool = typer.Option(False, "--paste-content", help="Flag to manually paste the post content after the command.")
+    ):
+    """Reparse a specific post."""
+    # get the post ID
+    conn = get_connection()
+    curr = conn.cursor()
+    
+    curr.execute("SELECT blog_id, title, url AS post_url, publication_date AS date FROM posts WHERE url = %s", (url,))
+    result: dict[str, Any] | None = curr.fetchone() # type: ignore
+    
+    if result is None:
+        typer.echo("Post not found.")
+        return
+    
+    if manually_paste_content:
+        post_content = multiline_user_input()
+    else:
+        post_content = None
+        
+    process_single_post(result, result['blog_id'], post_content, overwrite=True)
+    
 
-def extract_post_metadata(post_url: str, model: str = "gemini/gemini-2.5-flash-preview-05-20") -> dict:
+def process_single_post(post: dict[str, Any], blog_id: int, post_text: str | None = None, overwrite=False):
+    """
+    Extract metadata from a post and add it to the database.
+    
+    Args:
+        post: A dictionary containing the post information. Expects keys:
+            - title: The title of the post
+            - post_url: The URL of the post
+            - date: The publication date of the post
+        blog_id: The ID of the blog to which the post belongs.
+    """
+    
+    local_conn = get_connection()  # Each process needs its own connection
+    local_cursor = local_conn.cursor()
+    
+    try:
+        typer.echo(f"Processing post: {post['post_url']}")
+        metadata = extract_post_metadata(post['post_url'], post_text=post_text)
+        
+        # Add new topics to database if any
+        if metadata.get('new_topic_suggestions'):
+            psycopg2.extras.execute_values(
+                local_cursor,
+                "INSERT INTO topics (name) VALUES %s ON CONFLICT DO NOTHING",
+                [(t,) for t in metadata['new_topic_suggestions']]
+            )
+        
+        # Add the post
+        add_post_to_db(local_cursor, blog_id, post, metadata, upsert=overwrite)
+        local_conn.commit()
+    except Exception as e:
+        # Log the error but don't disable the blog immediately
+        # We'll decide whether to disable after all posts are processed
+        log_error(local_cursor, blog_id, 'parsing', str(e))
+        typer.echo(typer.style(str(e), fg=typer.colors.RED))
+    finally:
+        local_conn.close()
+        
+def add_post_to_db(cursor, blog_id: int, post_info: dict[str, str], metadata: dict[str, Any], upsert: bool = False):
+    """Add a post to the database if it isn't already registered."""
+    upsert_clause = """
+        ON CONFLICT (url)DO UPDATE SET
+        summary = EXCLUDED.summary,
+        reading_time = EXCLUDED.reading_time
+    """
+
+    cursor.execute(
+        f"""INSERT INTO posts (blog_id, title, url, publication_date, reading_time, summary)
+        VALUES (%s, %s, %s, %s, %s, %s) {upsert_clause if upsert else ""}
+        """,
+        (
+            blog_id, post_info['title'], post_info['post_url'], post_info['date'],
+            metadata['reading_time'], metadata['summary']
+        )
+    )
+    cursor.execute("SELECT id FROM posts WHERE url = %s", (post_info['post_url'],))
+    post_id = cursor.fetchone()['id']
+    topics = metadata.get('matched_topics', []) + metadata.get('new_topic_suggestions', [])
+
+    # get the IDs of each topic
+    cursor.execute("SELECT id FROM topics WHERE name = ANY(%s)", (topics,))
+    topic_ids = [row['id'] for row in cursor.fetchall()]
+
+    psycopg2.extras.execute_values(
+        cursor,
+        """INSERT INTO post_topics (post_id, topic_id) VALUES %s ON CONFLICT DO NOTHING""",
+        [(post_id, topic_id) for topic_id in topic_ids]
+    )
+
+def extract_post_metadata(
+    post_url: str,
+    post_text: str | None = None,
+    model: str = "gemini/gemini-2.5-flash-preview-05-20"
+    ) -> dict:
     """Extract post metadata."""
     metadata = {}
 
-    content = fetch_with_retries(post_url).text
-    text_content = extract_post_text(content)
-
+    text_content = post_text
+    if text_content is None:
+        content = fetch_with_retries(post_url).text
+        text_content = extract_post_text(content)
+        
     summary = extract_summary(text_content, model)
     metadata.update(summary)
     
