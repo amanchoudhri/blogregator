@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS error_log (
     blog_id INTEGER REFERENCES blogs(id),
     timestamp TIMESTAMPTZ DEFAULT NOW(),
     error_type TEXT,
-    message TEXT
+    message TEXT,
+    post_id INTEGER REFERENCES posts(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_posts_blog_id ON posts(blog_id);

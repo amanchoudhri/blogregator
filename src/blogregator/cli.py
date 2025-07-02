@@ -7,12 +7,13 @@ from functools import partial
 from typing import Annotated
 
 import typer
+import psycopg2.extras
 
 from blogregator.blog import blog_cli
 from blogregator.database import get_connection, init_database, log_error
 from blogregator.emails import notify
 from blogregator.parser import parse_post_list
-from blogregator.post import post_cli, process_single_post
+from blogregator.post import post_cli, process_single_post, add_post_to_db
 
 app = typer.Typer()
 app.add_typer(blog_cli, name='blog', help="Commands for managing blogs.")
@@ -55,14 +56,26 @@ def process_blog(conn, blog):
     """Run scraper for a single blog and handle results."""
     cursor = conn.cursor()
     typer.echo(f"Checking blog '{blog['name']}' (ID {blog['id']})...")
+    
+    # Parse post list - blog parse errors disable the entire blog
     try:
         posts = parse_post_list(blog['url'], json.loads(blog['scraping_schema']))
     except Exception as e:
-        log_error(cursor, blog['id'], 'network', str(e))
-        return {'success': 0, 'network': 1, 'parsing': 0}
+        log_error(cursor, blog['id'], 'blog_parse', str(e))
+        cursor.execute("UPDATE blogs SET status = %s WHERE id = %s", ('Error', blog['id']))
+        return {
+            "new_posts_found": 0,
+            "full_success": 0,
+            "partial_success": 0, 
+            "network_errors": 0,
+            "llm_breakdown": {
+                "missing_summary": 0,
+                "missing_reading_time": 0,
+                "missing_topics": 0
+            }
+        }
 
-    metrics = {'success': 0, 'network': 0, 'parsing': 0}
-    
+    # Find new posts
     post_urls = [p['post_url'] for p in posts]
     cursor.execute("SELECT url FROM posts WHERE url = ANY(%s)", (post_urls,))
     existing = {row['url'] for row in cursor.fetchall()}
@@ -71,42 +84,59 @@ def process_blog(conn, blog):
     
     typer.echo(f"Found {len(new_posts)} new posts.")
 
-
-    # Determine optimal number of workers based on CPU count and post count
-    max_workers = min(os.cpu_count() or 4, len(new_posts))
-    # Ensure we don't create too many processes for just a few posts
-    if max_workers > 8:
-        max_workers = 8
-    
-    combined_metrics = {'success': 0, 'network': 0, 'parsing': 0}
-    error_encountered = False
-    
-    # Use ProcessPoolExecutor for parallel processing
+    # Process posts in parallel
+    results = []
     if new_posts:
+        max_workers = min(os.cpu_count() or 4, len(new_posts), 8)
+        
         with mp.Pool(processes=max_workers) as pool:
-            # Map the function to process posts in parallel
-            process_func = partial(process_single_post, blog_id=blog['id'])
-            results = list(pool.map(process_func, new_posts))
-            
-            # Combine metrics from all workers
-            for result in results:
-                for key in combined_metrics:
-                    combined_metrics[key] += result[key]
-                if result['parsing'] > 0:
-                    error_encountered = True
+            results = list(pool.map(process_single_post, new_posts))
     
-    # Update metrics with combined results
-    metrics.update(combined_metrics)
+    # Batch database operations
+    posts_to_save = []
+    all_topics = set()
     
-    # If any parsing errors occurred, disable the blog
-    if error_encountered:
-        cursor.execute(
-            "UPDATE blogs SET status = %s WHERE id = %s", ('Error', blog['id'])
+    for result in results:
+        # Only save posts with at least one LLM field populated
+        if any([result.summary, result.reading_time, result.topics]):
+            posts_to_save.append(result)
+            if result.topics:
+                all_topics.update(result.topics)
+        
+        # Log LLM errors for debugging
+        if result.error_type == "llm":
+            log_error(cursor, blog['id'], 'llm', result.error_message or "LLM extraction failed")
+    
+    # Add new topics first
+    if all_topics:
+        psycopg2.extras.execute_values(
+            cursor,
+            "INSERT INTO topics (name) VALUES %s ON CONFLICT DO NOTHING",
+            [(topic,) for topic in all_topics]
         )
-        typer.echo(typer.style(
-            f"Disabled blog {blog['id']} due to parsing errors",
-            fg=typer.colors.RED
-        ))
+    
+    # Add posts to database
+    for result in posts_to_save:
+        metadata = {
+            'summary': result.summary,
+            'reading_time': result.reading_time,
+            'matched_topics': result.topics or [],
+            'new_topic_suggestions': []
+        }
+        add_post_to_db(cursor, blog['id'], result.original_post, metadata)
+    
+    # Calculate detailed metrics
+    metrics = {
+        "new_posts_found": len(new_posts),
+        "full_success": sum(1 for r in results if r.success),
+        "partial_success": sum(1 for r in results if not r.success and any([r.summary, r.reading_time, r.topics])),
+        "network_errors": sum(1 for r in results if r.error_type == "network"),
+        "llm_breakdown": {
+            "missing_summary": sum(1 for r in results if not r.summary and r.error_type != "network"),
+            "missing_reading_time": sum(1 for r in results if not r.reading_time and r.error_type != "network"),
+            "missing_topics": sum(1 for r in results if not r.topics and r.error_type != "network")
+        }
+    }
     
     return metrics
 
@@ -130,20 +160,73 @@ def run_check(
             return
 
     blogs = fetch_blogs(cursor, blog_id)
-    totals = {'success': 0, 'network': 0, 'parsing': 0}
+    totals = {
+        "new_posts_found": 0,
+        "full_success": 0,
+        "partial_success": 0, 
+        "network_errors": 0,
+        "llm_breakdown": {
+            "missing_summary": 0,
+            "missing_reading_time": 0,
+            "missing_topics": 0
+        }
+    }
+    blog_parse_errors = 0
 
     for blog in blogs:
         metrics = process_blog(conn, blog)
         conn.commit()
-        for key, value in metrics.items():
-            totals[key] += value
+        
+        # Aggregate metrics
+        for key in ["new_posts_found", "full_success", "partial_success", "network_errors"]:
+            totals[key] += metrics[key]
+        
+        for key in totals["llm_breakdown"]:
+            totals["llm_breakdown"][key] += metrics["llm_breakdown"][key]
+        
+        # Check if blog was disabled due to parse errors
+        if metrics["new_posts_found"] == 0 and metrics["full_success"] == 0 and metrics["partial_success"] == 0:
+            cursor.execute("SELECT status FROM blogs WHERE id = %s", (blog['id'],))
+            if cursor.fetchone()['status'] == 'Error':
+                blog_parse_errors += 1
 
-    typer.echo(typer.style(
-        (f"Done. Posts added: {totals['success']}, "
-        f"network errors: {totals['network']}, "
-        f"parsing errors: {totals['parsing']}"),
-        fg=typer.colors.BLUE
-    ))
+    # Generate detailed output
+    posts_added = totals["full_success"] + totals["partial_success"]
+    complete_count = totals["full_success"]
+    partial_count = totals["partial_success"]
+    
+    status_parts = []
+    if posts_added > 0:
+        if complete_count > 0 and partial_count > 0:
+            status_parts.append(f"added: {posts_added} ({complete_count} complete, {partial_count} partial)")
+        elif complete_count > 0:
+            status_parts.append(f"added: {posts_added} (all complete)")
+        else:
+            status_parts.append(f"added: {posts_added} (all partial)")
+    
+    if totals["network_errors"] > 0:
+        status_parts.append(f"Network errors: {totals['network_errors']}")
+    
+    # LLM failure details
+    llm_failures = []
+    for field, count in totals["llm_breakdown"].items():
+        if count > 0:
+            field_name = field.replace("missing_", "")
+            llm_failures.append(f"{count} missing {field_name}")
+    
+    if llm_failures:
+        status_parts.append(f"LLM failures: {', '.join(llm_failures)}")
+    
+    if blog_parse_errors > 0:
+        status_parts.append(f"Blog parse errors: {blog_parse_errors} blog{'s' if blog_parse_errors > 1 else ''} disabled")
+    
+    summary = f"Done. Posts found: {totals['new_posts_found']}"
+    if status_parts:
+        summary += ", " + ", ".join(status_parts)
+    else:
+        summary += ", no changes needed"
+
+    typer.echo(typer.style(summary, fg=typer.colors.BLUE))
 
     conn.close()
 

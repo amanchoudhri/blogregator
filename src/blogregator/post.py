@@ -1,4 +1,5 @@
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
+from dataclasses import dataclass
 
 import typer
 
@@ -10,6 +11,20 @@ import psycopg2.extras
 from blogregator.database import get_connection, log_error
 from blogregator.llm import generate_json_from_llm
 from blogregator.utils import fetch_with_retries, multiline_user_input
+
+@dataclass
+class PostProcessingResult:
+    original_post: dict
+    success: bool
+    
+    extracted_text: Optional[str] = None
+    
+    summary: Optional[str] = None
+    reading_time: Optional[int] = None
+    topics: Optional[list] = None
+    
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
 
 post_cli = typer.Typer(
     name="post",
@@ -114,54 +129,120 @@ def reparse_post(
     else:
         post_content = None
         
-    process_single_post(result, result['blog_id'], post_content, overwrite=True)
+    # Legacy interface - process and save to DB
+    result_obj = process_single_post(result, post_content)
+    if any([result_obj.summary, result_obj.reading_time, result_obj.topics]):
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            # Add new topics to database if any
+            if result_obj.topics:
+                psycopg2.extras.execute_values(
+                    cursor,
+                    "INSERT INTO topics (name) VALUES %s ON CONFLICT DO NOTHING",
+                    [(t,) for t in result_obj.topics]
+                )
+            
+            # Add the post
+            metadata = {
+                'summary': result_obj.summary,
+                'reading_time': result_obj.reading_time,
+                'matched_topics': result_obj.topics or [],
+                'new_topic_suggestions': []
+            }
+            add_post_to_db(cursor, result['blog_id'], result, metadata, upsert=True)
+            conn.commit()
+            typer.echo("Post reprocessed successfully.")
+        except Exception as e:
+            typer.echo(typer.style(f"Error saving post: {e}", fg=typer.colors.RED))
+        finally:
+            conn.close()
+    else:
+        typer.echo(typer.style("Post processing failed - no content extracted", fg=typer.colors.RED))
     
 
-def process_single_post(post: dict[str, Any], blog_id: int, post_text: str | None = None, overwrite=False):
+def process_single_post(post: dict[str, Any], post_text: str | None = None) -> PostProcessingResult:
     """
-    Extract metadata from a post and add it to the database.
+    Extract metadata from a post without writing to database.
     
     Args:
         post: A dictionary containing the post information. Expects keys:
             - title: The title of the post
             - post_url: The URL of the post
             - date: The publication date of the post
-        blog_id: The ID of the blog to which the post belongs.
+        post_text: Optional pre-fetched post content
     
     Returns:
-        dict: Metrics dictionary with keys 'success', 'network', 'parsing'
+        PostProcessingResult: Processing results with extracted metadata and error info
     """
     
-    metrics = {'success': 0, 'network': 0, 'parsing': 0}
-    local_conn = get_connection()  # Each process needs its own connection
-    local_cursor = local_conn.cursor()
+    result = PostProcessingResult(
+        original_post=post,
+        success=False,
+    )
     
     try:
         typer.echo(f"Processing post: {post['post_url']}")
-        metadata = extract_post_metadata(post['post_url'], post_text=post_text)
         
-        # Add new topics to database if any
-        if metadata.get('new_topic_suggestions'):
-            psycopg2.extras.execute_values(
-                local_cursor,
-                "INSERT INTO topics (name) VALUES %s ON CONFLICT DO NOTHING",
-                [(t,) for t in metadata['new_topic_suggestions']]
-            )
+        # Try to get post content
+        try:
+            if post_text is None:
+                content = fetch_with_retries(post['post_url']).text
+                result.extracted_text = extract_post_text(content)
+            else:
+                result.extracted_text = post_text
+        except Exception as e:
+            result.error_type = "network"
+            result.error_message = str(e)
+            return result
         
-        # Add the post
-        add_post_to_db(local_cursor, blog_id, post, metadata, upsert=overwrite)
-        local_conn.commit()
-        metrics['success'] = 1
+        # Attempt all three LLM extractions
+        llm_errors = []
+        
+        # Extract summary
+        try:
+            summary_data = extract_summary(result.extracted_text)
+            result.summary = summary_data.get('summary')
+            technical_density = summary_data.get('technical_density', 2)
+        except Exception as e:
+            llm_errors.append(f"summary: {str(e)}")
+            technical_density = 2
+        
+        # Extract reading time
+        try:
+            result.reading_time = estimate_reading_time(result.extracted_text, technical_density)
+        except Exception as e:
+            llm_errors.append(f"reading_time: {str(e)}")
+        
+        # Extract topics
+        try:
+            # Get existing topics for context
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM topics")
+            existing_topics = [row.get('name', '') for row in cursor.fetchall()]
+            cursor.close()
+            conn.close()
+            
+            topics_data = extract_topics(result.extracted_text, existing_topics)
+            result.topics = topics_data.get('matched_topics', []) + topics_data.get('new_topic_suggestions', [])
+        except Exception as e:
+            llm_errors.append(f"topics: {str(e)}")
+        
+        # Set success and error info
+        if llm_errors:
+            result.error_type = "llm"
+            result.error_message = "; ".join(llm_errors)
+        
+        # Success only if ALL three fields are populated
+        result.success = bool(result.summary and result.reading_time and result.topics)
+        
     except Exception as e:
-        # Log the error but don't disable the blog immediately
-        # We'll decide whether to disable after all posts are processed
-        log_error(local_cursor, blog_id, 'parsing', str(e))
-        typer.echo(typer.style(str(e), fg=typer.colors.RED))
-        metrics['parsing'] = 1
-    finally:
-        local_conn.close()
+        # Unexpected error - treat as LLM error
+        result.error_type = "llm"
+        result.error_message = str(e)
         
-    return metrics
+    return result
         
 def add_post_to_db(cursor, blog_id: int, post_info: dict[str, str], metadata: dict[str, Any], upsert: bool = False):
     """Add a post to the database if it isn't already registered."""
