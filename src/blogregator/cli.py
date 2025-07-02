@@ -4,10 +4,8 @@ import os
 
 from functools import partial
 
-from typing import Annotated, Any
+from typing import Annotated
 
-import psycopg2
-import psycopg2.extras
 import typer
 
 from blogregator.blog import blog_cli
@@ -33,6 +31,7 @@ def send_newsletter(hour_window: Annotated[int, typer.Option(help="Number of hou
             typer.echo(typer.style(f"Newsletter with {n_posts} posts sent successfully", fg=typer.colors.GREEN))
     except Exception as e:
         typer.echo(typer.style(f"Failed to send newsletter: {e}", fg=typer.colors.RED))
+        raise e
         
 @app.command(name="init-db")
 def init_db():
