@@ -59,12 +59,20 @@ def view_post(
 
 @post_cli.command(name="list")
 def list_posts(
-    blog_id: int = typer.Argument(..., help="ID of the blog"),
+    blog_name: str = typer.Argument(..., help="Name of the blog"),
     limit: int = typer.Option(10, "-n", help="Max number of posts to display")
 ):
     """View recent posts for a specific blog."""
     conn = get_connection()
     cursor = conn.cursor()
+    
+    cursor.execute("SELECT id FROM blogs WHERE name = %s", (blog_name,))
+    result: dict[str, int] | None = cursor.fetchone() # type: ignore
+    if result is None:
+        typer.echo("Blog not found.")
+        return
+
+    blog_id = result['id']
     cursor.execute(
         "SELECT id, title, publication_date, url FROM posts WHERE blog_id = %s "
         "ORDER BY publication_date DESC LIMIT %s", (blog_id, limit)
@@ -119,8 +127,12 @@ def process_single_post(post: dict[str, Any], blog_id: int, post_text: str | Non
             - post_url: The URL of the post
             - date: The publication date of the post
         blog_id: The ID of the blog to which the post belongs.
+    
+    Returns:
+        dict: Metrics dictionary with keys 'success', 'network', 'parsing'
     """
     
+    metrics = {'success': 0, 'network': 0, 'parsing': 0}
     local_conn = get_connection()  # Each process needs its own connection
     local_cursor = local_conn.cursor()
     
@@ -139,13 +151,17 @@ def process_single_post(post: dict[str, Any], blog_id: int, post_text: str | Non
         # Add the post
         add_post_to_db(local_cursor, blog_id, post, metadata, upsert=overwrite)
         local_conn.commit()
+        metrics['success'] = 1
     except Exception as e:
         # Log the error but don't disable the blog immediately
         # We'll decide whether to disable after all posts are processed
         log_error(local_cursor, blog_id, 'parsing', str(e))
         typer.echo(typer.style(str(e), fg=typer.colors.RED))
+        metrics['parsing'] = 1
     finally:
         local_conn.close()
+        
+    return metrics
         
 def add_post_to_db(cursor, blog_id: int, post_info: dict[str, str], metadata: dict[str, Any], upsert: bool = False):
     """Add a post to the database if it isn't already registered."""
