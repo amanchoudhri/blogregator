@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from typing import List, Any, Optional
 
-from blogregator.utils import fetch_with_retries
+from .utils import fetch_with_retries
 
 def parse_date(date_str: str, format: str, alternate_formats: List[str] = []) -> str | None:
     try:

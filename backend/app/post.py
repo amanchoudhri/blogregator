@@ -5,12 +5,11 @@ import typer
 
 from bs4 import BeautifulSoup
 
-import psycopg2
-import psycopg2.extras
+import psycopg
 
-from blogregator.database import get_connection, log_error
-from blogregator.llm import generate_json_from_llm
-from blogregator.utils import fetch_with_retries, multiline_user_input
+from .database import get_connection
+from .llm import generate_json_from_llm
+from .utils import fetch_with_retries, multiline_user_input
 
 @dataclass
 class PostProcessingResult:
@@ -137,8 +136,7 @@ def reparse_post(
         try:
             # Add new topics to database if any
             if result_obj.topics:
-                psycopg2.extras.execute_values(
-                    cursor,
+                cursor.executemany(
                     "INSERT INTO topics (name) VALUES %s ON CONFLICT DO NOTHING",
                     [(t,) for t in result_obj.topics]
                 )
@@ -269,8 +267,7 @@ def add_post_to_db(cursor, blog_id: int, post_info: dict[str, str], metadata: di
     cursor.execute("SELECT id FROM topics WHERE name = ANY(%s)", (topics,))
     topic_ids = [row['id'] for row in cursor.fetchall()]
 
-    psycopg2.extras.execute_values(
-        cursor,
+    cursor.executemany(
         """INSERT INTO post_topics (post_id, topic_id) VALUES %s ON CONFLICT DO NOTHING""",
         [(post_id, topic_id) for topic_id in topic_ids]
     )

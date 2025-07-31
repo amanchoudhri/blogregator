@@ -5,7 +5,7 @@ from email.mime.text import MIMEText
 
 from typing import Any, Mapping
 
-from blogregator.database import get_connection
+from .database import get_connection
 
 def get_new_posts(hour_window: int = 8) -> list[Mapping[str, Any]]:
     """Get new posts discovered in the last hour_window hours."""

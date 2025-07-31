@@ -1,19 +1,19 @@
 import os
+from typing import Any
 
-import psycopg2
-import psycopg2.extras
+import psycopg
+from psycopg.rows import dict_row
 
-from blogregator.utils import utcnow
+from .utils import utcnow
 
-def get_connection():
+def get_connection() -> psycopg.Connection[dict[str, Any]]:
     database_url = os.environ.get('DATABASE_URL')
     if not database_url:
         raise ValueError("DATABASE_URL environment variable is required!")
-    conn = psycopg2.connect(
-            database_url,
-            cursor_factory=psycopg2.extras.RealDictCursor 
-            )
-    return conn
+    # known pyright typing incompatibility:
+    # https://github.com/psycopg/psycopg/issues/865
+    conn = psycopg.connect(database_url, row_factory=dict_row) # type: ignore
+    return conn # type: ignore
 
 def init_database(sql_file: str = "sql/schema.sql"):
     """Initialize the database by creating tables from a schema file."""

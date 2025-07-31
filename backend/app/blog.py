@@ -4,38 +4,62 @@ import datetime
 from typing import Annotated, List, Dict, Any, Optional
 from urllib.parse import urlparse
 
+from psycopg.rows import class_row
 import typer
 
 from bs4 import BeautifulSoup
 
-from blogregator.database import get_connection
-from blogregator.llm import generate_json_from_llm
-from blogregator.prompts import GENERATE_SCHEMA, CORRECT_SCHEMA
-from blogregator.parser import parse_post_list
-from blogregator.utils import fetch_with_retries
+from .database import get_connection
+from .llm import generate_json_from_llm
+from .prompts import GENERATE_SCHEMA, CORRECT_SCHEMA
+from .parser import parse_post_list
+from .utils import fetch_with_retries
+from .models import Blog
 
 blog_cli = typer.Typer(
     name="blog",
     help="Manage and interact with blogs in the registry."
 )
 
-@blog_cli.command(name="list")
-def list_blogs():
-    """List all monitored blogs with status and last checked date."""
+def fetch_blogs():
+    """Return all monitored blogs with status and last checked date."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name, url, status, last_checked FROM blogs ORDER BY id")
+    cursor.execute("SELECT id, name, url, last_checked, scraping_successful FROM blogs ORDER BY id")
     rows = cursor.fetchall()
     conn.close()
 
-    if not rows:
+    blogs = [Blog(**row) for row in rows]
+
+    return blogs
+
+def fetch_user_blogs(user_id: int):
+    """Return all blogs a user follows."""
+    with get_connection() as conn:
+        BlogFactory = class_row(Blog)
+        with conn.cursor(row_factory=BlogFactory) as cursor:
+            cursor.execute(
+                """SELECT * FROM blogs WHERE id IN (
+                    SELECT blog_id FROM blog_users WHERE user_id = %s
+                )""", (user_id,)
+                )
+            blogs = cursor.fetchall()
+
+    return blogs
+
+@blog_cli.command(name="list")
+def list_blogs():
+    """List all monitored blogs with status and last checked date."""
+    blogs = fetch_blogs()
+
+    if not blogs:
         typer.echo("No blogs found.")
         return
 
     typer.echo(f"{'ID':<4} {'Name':<20} {'Status':<10} {'Last Checked'}")
-    for r in rows:
-        last = r['last_checked'] or 'Never'
-        typer.echo(f"{r['id']:<4} {r['name']:<20} {r['status']:<10} {last}")
+    for blog in blogs:
+        last = blog.last_checked or 'Never'
+        typer.echo(f"{blog.id:<4} {blog.name:<20} {last}")
 
 def generate_schema(html_content, url):
     """Use Gemini to generate a parser function for the blog."""
@@ -141,7 +165,7 @@ def add_blog(
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM blogs WHERE url = %s", (url,))
-    count = cursor.fetchone()['count']
+    count = cursor.fetchone()['count'] # type: ignore
     if count > 0:
         if not typer.confirm(f"Blog with URL {url} already exists. Overwrite?"):
             conn.close()

@@ -2,24 +2,22 @@ import json
 import multiprocessing as mp
 import os
 
-from functools import partial
-
 from typing import Annotated
 
 import typer
-import psycopg2.extras
+import psycopg.extras
 
-from blogregator.blog import blog_cli
-from blogregator.database import get_connection, init_database, log_error
-from blogregator.emails import notify
-from blogregator.parser import parse_post_list
-from blogregator.post import post_cli, process_single_post, add_post_to_db
+from .blog import blog_cli
+from .database import get_connection, init_database, log_error
+from .emails import notify
+from .parser import parse_post_list
+from .post import post_cli, process_single_post, add_post_to_db
 
-app = typer.Typer()
-app.add_typer(blog_cli, name='blog', help="Commands for managing blogs.")
-app.add_typer(post_cli, name='post', help="Commands for managing posts.")
+cli = typer.Typer()
+cli.add_typer(blog_cli, name='blog', help="Commands for managing blogs.")
+cli.add_typer(post_cli, name='post', help="Commands for managing posts.")
 
-@app.command(name='send-newsletter')
+@cli.command(name='send-newsletter')
 def send_newsletter(hour_window: Annotated[int, typer.Option(help="Number of hours to look back for new posts")] = 8):
     """Send an email with new posts discovered in the last hour_window hours."""
     typer.echo(f"Looking for posts from the past {hour_window} hours...")
@@ -34,7 +32,7 @@ def send_newsletter(hour_window: Annotated[int, typer.Option(help="Number of hou
         typer.echo(typer.style(f"Failed to send newsletter: {e}", fg=typer.colors.RED))
         raise e
         
-@app.command(name="init-db")
+@cli.command(name="init-db")
 def init_db():
     """Initialize the database by creating tables from a schema file."""
     try:
@@ -109,8 +107,7 @@ def process_blog(conn, blog):
     
     # Add new topics first
     if all_topics:
-        psycopg2.extras.execute_values(
-            cursor,
+        cursor.executemany(
             "INSERT INTO topics (name) VALUES %s ON CONFLICT DO NOTHING",
             [(topic,) for topic in all_topics]
         )
@@ -141,7 +138,7 @@ def process_blog(conn, blog):
     return metrics
 
 
-@app.command(name="run-check")
+@cli.command(name="run-check")
 def run_check(
         blog_id: Annotated[int | None, typer.Option(help="ID of a specific blog to check")] = None,
         yes: Annotated[bool, typer.Option("-y", help="Skip confirmation for checking all blogs")] = False
@@ -234,4 +231,4 @@ def run_check(
 
 
 if __name__ == "__main__":
-    app()
+    cli()
