@@ -11,7 +11,7 @@ from argon2.exceptions import VerificationError, VerifyMismatchError, InvalidHas
 
 from dotenv import load_dotenv
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 import jwt
@@ -23,6 +23,7 @@ from psycopg.rows import class_row
 from pydantic import AfterValidator, BaseModel, Field, EmailStr
 
 from ..database import get_connection
+from ..rate_limit import limiter
 from ..emails import send_otp_email
 from ..utils import utcnow
 from ..models import User
@@ -44,6 +45,8 @@ MAX_OTP_REQUESTS_PER_HOUR = 3
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
 ph = PasswordHasher()
+
+DUMMY_HASH = ph.hash('')
 
 router = APIRouter(prefix="/auth")
 
@@ -118,6 +121,16 @@ def update_pw_hash(email, new_hash):
             (new_hash, email)
             )
 
+def dummy_hash_verification(attempt: str):
+    """
+    Run a dummy argon2 verification step to
+    minimize timing attacks.
+    """
+    try:
+        ph.verify(DUMMY_HASH, attempt)
+    except:
+        pass
+
 async def authenticate_user(db_conn, email, password) -> UserInDB | None:
     """
     Authenticate a user with email and password.
@@ -137,7 +150,7 @@ async def authenticate_user(db_conn, email, password) -> UserInDB | None:
 
     if not user:
         # always run a hash, to prevent timing attacks
-        ph.hash('')
+        dummy_hash_verification(password)
         return None
 
     try:
@@ -238,7 +251,7 @@ def is_valid_otp(db_conn: psycopg.Connection[dict], user: UserInDB | None, otp: 
         # or if they haven't requested an OTP,
         # to minimize timing attack potential
         if (not row) or (not user):
-            ph.hash('')
+            dummy_hash_verification(otp.code)
             return False
 
         # check the provided OTP against the hash
@@ -246,7 +259,7 @@ def is_valid_otp(db_conn: psycopg.Connection[dict], user: UserInDB | None, otp: 
             return ph.verify(row['otp_hash'], otp.code)
         except VerifyMismatchError:
             # Normal incorrect-OTP; just return False.
-            return None
+            return False
         except (InvalidHashError, VerificationError):
             # These indicate programmer or infrastructure problems.
             if user:
@@ -329,7 +342,9 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
 # ======= ENDPOINTS =======
 
 @router.post("/token")
+@limiter.limit("10/minute;50/hour;500/day")
 async def login_for_access_token(
+    request: Request,
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
 ) -> Token:
     """
@@ -421,7 +436,9 @@ async def request_password_reset(email: Annotated[str, Body()]) -> None:
         send_otp(otp, email)
 
 @router.post("/reset/verify")
+@limiter.limit("3/minute;10/15minute;30/hour")
 async def verify_otp(
+    request: Request,
     email: Annotated[str, Body()],
     otp: Annotated[OTP, Body()]
     ) -> Token:
