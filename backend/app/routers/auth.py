@@ -8,6 +8,7 @@ from typing import Annotated
 import psycopg
 
 from argon2 import PasswordHasher
+from dotenv import load_dotenv
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -19,10 +20,13 @@ from pydantic import AfterValidator, BaseModel, Field, EmailStr
 import jwt
 from jwt.exceptions import InvalidTokenError
 
+from app.emails import send_otp_email
+
 from ..database import get_connection
 from ..utils import utcnow
 from ..models import User
 
+load_dotenv()
 
 SECRET_KEY = os.environ['JWT_SECRET']
 ALGORITHM = os.environ['JWT_ALGORITHM']
@@ -121,17 +125,16 @@ async def authenticate_user(db_conn, email, password) -> UserInDB | None:
     """
     user = get_user(db_conn, email)
 
-    if user is None:
-        return None
-
     try:
-        ph.verify(user.hashed_password, password)
+        # always run a hash, to prevent timing attacks
+        hashed_password = user.hashed_password if user else ''
+        ph.verify(hashed_password, password)
     except:
         return None
 
     # login successful. since we have the cleartext pw,
     # check if the pw needs rehashing
-    if ph.check_needs_rehash(user.hashed_password):
+    if user and ph.check_needs_rehash(user.hashed_password):
         update_pw_hash(user.email, ph.hash(password))
 
     return user
@@ -185,8 +188,13 @@ def send_otp(otp: OTP, email: str) -> bool:
     """
     Send the OTP to a user.
     """
-    # PLACEHOLDER
-    return True
+    try:
+        send_otp_email(otp.code, email)
+        return True
+    except Exception as e:
+        print(e)
+        return False
+    
 
 def is_valid_otp(db_conn: psycopg.Connection[dict], user_id: int, otp: OTP):
     """Verify if an OTP is valid for a user."""
