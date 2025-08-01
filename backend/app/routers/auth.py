@@ -3,27 +3,27 @@ import re
 import secrets
 
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from typing import Annotated
-
-import psycopg
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, VerifyMismatchError, InvalidHashError
+
 from dotenv import load_dotenv
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
+import jwt
+from jwt.exceptions import InvalidTokenError
+
+import psycopg
 from psycopg.rows import class_row
 
 from pydantic import AfterValidator, BaseModel, Field, EmailStr
 
-import jwt
-from jwt.exceptions import InvalidTokenError
-
-from app.emails import send_otp_email
-
 from ..database import get_connection
+from ..emails import send_otp_email
 from ..utils import utcnow
 from ..models import User
 
@@ -31,6 +31,9 @@ load_dotenv()
 
 SECRET_KEY = os.environ['JWT_SECRET']
 ALGORITHM = os.environ['JWT_ALGORITHM']
+
+if ALGORITHM not in {"HS256"}:
+    raise RuntimeError(f"JWT_ALGORITHM {ALGORITHM} not permitted")
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 OTP_ACCESS_TOKEN_EXPIRE_MINUTES = 5 # much shorter access for pw reset auth
@@ -43,6 +46,12 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
 ph = PasswordHasher()
 
 router = APIRouter(prefix="/auth")
+
+CREDENTIALS_EXCEPTION = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Could not validate credentials",
+    headers={"WWW-Authenticate": "Bearer"},
+)
 
 # ======= MODELS =======
 
@@ -257,28 +266,40 @@ def mark_otps_invalid(db_conn: psycopg.Connection[dict], user_id: int):
 
 # ======= TOKENS =======
 
-def create_access_token(data: dict, expires_delta: timedelta):
-    """Create a JWT access token."""
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + expires_delta
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+class TokenScope(StrEnum):
+    ACCESS = 'access'
+    RESET_PASSWORD = 'reset_password'
+
+def _create_jwt(user: User, expires_delta: timedelta, scope: TokenScope):
+    """Create a JWT for a specific user."""
+    data = {
+        "sub": user.email,
+        "ver": user.jwt_version,
+        "scope": scope.value,
+        "exp": datetime.now(timezone.utc) + expires_delta
+    }
+    encoded_jwt = jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
-    """
-    Extract and validate the current user from JWT token.
-    """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+def create_access_token(user: User, expires_delta: timedelta):
+    """Create a JWT scoped for full access."""
+    return _create_jwt(user, expires_delta, TokenScope.ACCESS)
 
+def create_reset_password_token(user: User, expires_delta: timedelta):
+    """Create a JWT scoped only to reset password."""
+    return _create_jwt(user, expires_delta, TokenScope.RESET_PASSWORD)
+
+def decode_and_validate_token(token: Annotated[str, Depends(oauth2_scheme)]):
+    """
+    Decode a provided JWT and validate it.
+
+    Checks that it has a valid user email in the 'sub' payload
+    and the correct version in the 'ver' payload.
+    """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except InvalidTokenError:
-        raise credentials_exception
+        raise CREDENTIALS_EXCEPTION
 
     email = payload.get('sub')
 
@@ -286,11 +307,22 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
         user = get_user(db_conn, email)
 
     if not user:
-        raise credentials_exception
+        raise CREDENTIALS_EXCEPTION
 
     version = payload.get('ver')
     if version != user.jwt_version:
-        raise credentials_exception
+        raise CREDENTIALS_EXCEPTION
+
+    return payload, user
+
+async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
+    """
+    Extract and validate the current user from JWT token.
+    """
+    payload, user = decode_and_validate_token(token)
+
+    if payload['scope'] != TokenScope.ACCESS:
+        raise CREDENTIALS_EXCEPTION
 
     return user
 
@@ -325,13 +357,7 @@ async def login_for_access_token(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={
-                "sub": user.email,
-                "ver": user.jwt_version
-                },
-            expires_delta=access_token_expires
-        )
+        access_token = create_access_token(user, access_token_expires)
         return Token(access_token=access_token, token_type="bearer")
 
 @router.post("/new")
@@ -429,19 +455,17 @@ async def verify_otp(
         # mark the OTP just used as invalid
         mark_otps_invalid(db_conn, user.id)
 
-        access_token_expires = timedelta(
+        expires = timedelta(
             minutes=OTP_ACCESS_TOKEN_EXPIRE_MINUTES
             )
-        access_token = create_access_token(
-            data={"sub": user.email}, expires_delta=access_token_expires
-        )
-        return Token(access_token=access_token, token_type="bearer")
+        token = create_reset_password_token(user, expires)
+        return Token(access_token=token, token_type="bearer")
 
 
 @router.post("/reset/confirm")
 async def reset_password(
     new_password: Annotated[Password, Body()],
-    user: Annotated[User, Depends(get_current_user)]
+    token: Annotated[str, Depends(oauth2_scheme)]
     ):
     """
     Reset user's password using temporary token from OTP verification.
@@ -453,6 +477,13 @@ async def reset_password(
     Note:
         Requires authentication via temporary token from /reset/verify endpoint.
     """
+    # ensure the request is authenticated
+    payload, user = decode_and_validate_token(token)
+
+    # and that it has the correct scope
+    if payload['scope'] != TokenScope.RESET_PASSWORD:
+        raise CREDENTIALS_EXCEPTION
+
     new_pw_hash = ph.hash(new_password.password)
     update_pw_hash(user.email, new_pw_hash)
 
