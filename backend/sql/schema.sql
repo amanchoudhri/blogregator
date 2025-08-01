@@ -4,7 +4,6 @@ CREATE EXTENSION IF NOT EXISTS citext;
 -- Create the main tables
 CREATE TABLE IF NOT EXISTS blogs (
     id SERIAL PRIMARY KEY,
-    name TEXT,
     url TEXT UNIQUE,
     last_checked TIMESTAMPTZ,
     scraping_schema TEXT,
@@ -46,6 +45,7 @@ CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     email CITEXT UNIQUE NOT NULL,
     hashed_password TEXT NOT NULL,
+    jwt_version INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

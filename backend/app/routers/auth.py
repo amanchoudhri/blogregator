@@ -8,6 +8,7 @@ from typing import Annotated
 import psycopg
 
 from argon2 import PasswordHasher
+from argon2.exceptions import VerificationError, VerifyMismatchError, InvalidHashError
 from dotenv import load_dotenv
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
@@ -125,12 +126,23 @@ async def authenticate_user(db_conn, email, password) -> UserInDB | None:
     """
     user = get_user(db_conn, email)
 
+    if not user:
+        # always run a hash, to prevent timing attacks
+        ph.hash('')
+        return None
+
     try:
         # always run a hash, to prevent timing attacks
-        hashed_password = user.hashed_password if user else ''
-        ph.verify(hashed_password, password)
-    except:
+        ph.verify(user.hashed_password, password)
+    except VerifyMismatchError:
+        # Normal bad-password case; just return False.
         return None
+    except (InvalidHashError, VerificationError):
+        # These indicate programmer or infrastructure problems.
+        if user:
+            print(f"Password verification failed for user_id={user.id}")
+        # 2. Re-raise so FastAPI’s exception handler turns it into 500
+        raise
 
     # login successful. since we have the cleartext pw,
     # check if the pw needs rehashing
@@ -192,13 +204,16 @@ def send_otp(otp: OTP, email: str) -> bool:
         send_otp_email(otp.code, email)
         return True
     except Exception as e:
-        print(e)
         return False
     
 
-def is_valid_otp(db_conn: psycopg.Connection[dict], user_id: int, otp: OTP):
+def is_valid_otp(db_conn: psycopg.Connection[dict], user: UserInDB | None, otp: OTP):
     """Verify if an OTP is valid for a user."""
     with db_conn.cursor() as cur:
+        # still run a DB query if the user doesn't exist
+        # to minimize timing attack potential
+        user_id = user.id if user else -1
+
         # check for an active, unused otp for the given user
         expiry_time = utcnow() - timedelta(minutes=OTP_VALID_MINUTES)
         row = cur.execute(
@@ -210,14 +225,25 @@ def is_valid_otp(db_conn: psycopg.Connection[dict], user_id: int, otp: OTP):
             (user_id, expiry_time)
             ).fetchone()
 
-        if not row:
+        # still run a hash if the user doesn't exist
+        # or if they haven't requested an OTP,
+        # to minimize timing attack potential
+        if (not row) or (not user):
+            ph.hash('')
             return False
 
         # check the provided OTP against the hash
         try:
             return ph.verify(row['otp_hash'], otp.code)
-        except:
-            return False
+        except VerifyMismatchError:
+            # Normal incorrect-OTP; just return False.
+            return None
+        except (InvalidHashError, VerificationError):
+            # These indicate programmer or infrastructure problems.
+            if user:
+                print(f"Password verification failed for user_id={user.id}")
+            # 2. Re-raise so FastAPI’s exception handler turns it into 500
+            raise
 
 def mark_otps_invalid(db_conn: psycopg.Connection[dict], user_id: int):
     """
@@ -248,21 +274,25 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get('sub')
-        if email is None:
-            raise credentials_exception
-        token_data = TokenData(email=email)
     except InvalidTokenError:
         raise credentials_exception
 
-    with get_connection() as db_conn:
-        user = get_user(db_conn, email=token_data.email)
-        if user is None:
-            raise credentials_exception
-        return user
+    email = payload.get('sub')
 
+    with get_connection() as db_conn:
+        user = get_user(db_conn, email)
+
+    if not user:
+        raise credentials_exception
+
+    version = payload.get('ver')
+    if version != user.jwt_version:
+        raise credentials_exception
+
+    return user
 
 # ======= ENDPOINTS =======
 
@@ -296,7 +326,11 @@ async def login_for_access_token(
             )
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": user.email}, expires_delta=access_token_expires
+            data={
+                "sub": user.email,
+                "ver": user.jwt_version
+                },
+            expires_delta=access_token_expires
         )
         return Token(access_token=access_token, token_type="bearer")
 
@@ -385,10 +419,11 @@ async def verify_otp(
 
     with get_connection() as db_conn:
         user = get_user(db_conn, email)
-        if not user:
+
+        if not is_valid_otp(db_conn, user, otp):
             raise invalid_exception
 
-        if not is_valid_otp(db_conn, user.id, otp):
+        if not user:
             raise invalid_exception
 
         # mark the OTP just used as invalid
@@ -420,3 +455,11 @@ async def reset_password(
     """
     new_pw_hash = ph.hash(new_password.password)
     update_pw_hash(user.email, new_pw_hash)
+
+    # increment JWT version for the user to invalidate
+    # previously issued tokens
+    with get_connection() as db_conn:
+        db_conn.execute(
+            "UPDATE users SET jwt_version = jwt_version + 1 WHERE id = %s",
+            (user.id,)
+        )
