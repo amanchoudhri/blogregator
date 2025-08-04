@@ -128,7 +128,7 @@ def refine_blog_schema(user: CurrentUser, blog_id: int, feedback: Annotated[str,
                 last_modified_by = %s,
                 last_modified_at = NOW()
             WHERE id = %s""",
-            (new_schema, user.id, blog.id)
+            (json.dumps(new_schema), user.id, blog.id)
         )
 
         return {"schema": new_schema, "posts": reparsed_posts}
@@ -182,7 +182,7 @@ def confirm_scraping_schema(user: CurrentUser, blog_id: int):
         blog = check_blog_exists(db_conn, blog_id)
 
         is_right_user = blog.last_modified_by = user.id
-        is_within_window = blog.last_modified_at > (utcnow() + datetime.timedelta(hours=24))
+        is_within_window = blog.last_modified_at > (utcnow() - datetime.timedelta(hours=24))
         if not (is_right_user and is_within_window):
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
@@ -248,7 +248,7 @@ def has_open_ticket(db_conn: Connection[dict], blog_id: int) -> bool:
         n_tickets = cur.execute(
             "SELECT COUNT(*) FROM tickets WHERE blog_id = %s AND resolved = FALSE",
             (blog.id,)
-            ).fetchone()
+            ).fetchone()['count'] # type: ignore
 
     return n_tickets != 0
     
@@ -263,7 +263,8 @@ def refine_schema(
     previous_results: list[dict],
     user_feedback: str,
     html_content: str,
-    url: str
+    url: str,
+    error: str = ''
     ):
     formatted_previous_results = "\n\n".join(
         format_post_for_display(post, i) for i, post in enumerate(previous_results, 1)
@@ -273,7 +274,8 @@ def refine_schema(
         previous_results=formatted_previous_results,
         blog_url=url,
         html_content=html_content,
-        user_feedback=user_feedback
+        user_feedback=user_feedback,
+        error=error
     )
     return generate_json_from_llm(formatted_prompt)
 
