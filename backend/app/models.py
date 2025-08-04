@@ -6,6 +6,7 @@ class User(BaseModel):
     id: int
     email: EmailStr
     jwt_version: int
+    is_admin: bool = False
 
 class Blog(BaseModel):
     id: int
