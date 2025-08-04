@@ -1,19 +1,27 @@
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 
-from .blog import fetch_user_blogs
-from .routers import auth
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.errors import RateLimitExceeded
+
+from .routers import auth, blog, users
+from .rate_limit import ip_rate_limiter
+
+load_dotenv('/Users/amanchoudhri/aman/code/blogregator/backend/.env')
 
 app = FastAPI()
 
 app.include_router(auth.router)
+app.include_router(blog.router)
+app.include_router(users.router)
 
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
+app.state.limiter = ip_rate_limiter
 
-@app.get("/blogs")
-def read_blogs(user: Annotated[auth.User, Depends(auth.get_current_user)]):
-    blogs = fetch_user_blogs(user)
-    return {"user": user.email, "user_id": user.id, "blogs": blogs}
+@app.exception_handler(RateLimitExceeded)
+def rate_limit_exceeded_handler(request, exc):
+    return _rate_limit_exceeded_handler(request, exc)
+
+app.add_middleware(SlowAPIMiddleware)
