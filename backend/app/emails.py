@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import os
 import smtplib
 
@@ -5,7 +6,33 @@ from email.mime.text import MIMEText
 
 from typing import Any, Mapping
 
+from dotenv import load_dotenv
+
 from .database import get_connection
+
+load_dotenv()
+
+SMTP_HOST = os.environ['SMTP_HOST']
+SMTP_PORT = int(os.environ['SMTP_PORT'])
+SMTP_USER = os.environ['SMTP_USER']
+SMTP_PASSWORD = os.environ['SMTP_PASSWORD']
+
+
+def send_otp_email(otp: str, recipient: str):
+    body_text = f"Your OTP is: {otp}"
+    message = MIMEText(body_text)
+    _send_email(message, "no-reply@blogregator.app", [recipient])
+
+
+def _send_email(message: MIMEText, sender: str, recipients: list[str]):
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.send_message(
+            from_addr=sender,
+            to_addrs=recipients,
+            msg=message
+            )
 
 def get_new_posts(hour_window: int = 8) -> list[Mapping[str, Any]]:
     """Get new posts discovered in the last hour_window hours."""
