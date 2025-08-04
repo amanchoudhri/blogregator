@@ -23,7 +23,7 @@ from psycopg.rows import class_row
 from pydantic import AfterValidator, BaseModel, Field, EmailStr
 
 from ..database import get_connection
-from ..rate_limit import limiter
+from ..rate_limit import ip_rate_limiter, email_rate_limit
 from ..emails import send_otp_email
 from ..utils import utcnow
 from ..models import User
@@ -43,7 +43,10 @@ OTP_LENGTH = 6 # digits in an OTP
 OTP_VALID_MINUTES = 15
 MAX_OTP_REQUESTS_PER_HOUR = 3
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="auth/token",
+    refreshUrl="auth/refresh"
+    )
 ph = PasswordHasher()
 
 DUMMY_HASH = ph.hash('')
@@ -92,7 +95,7 @@ def get_user(db_conn: psycopg.Connection[dict], email):
                 ).fetchone()
         return match
 
-def create_user(email, password) -> bool:
+def create_user(email: str, password: str) -> bool:
     """
     Attempt to create a new user, returning status.
     """
@@ -281,6 +284,7 @@ def mark_otps_invalid(db_conn: psycopg.Connection[dict], user_id: int):
 
 class TokenScope(StrEnum):
     ACCESS = 'access'
+    ADMIN = 'admin'
     RESET_PASSWORD = 'reset_password'
 
 def _create_jwt(user: User, expires_delta: timedelta, scope: TokenScope):
@@ -293,14 +297,6 @@ def _create_jwt(user: User, expires_delta: timedelta, scope: TokenScope):
     }
     encoded_jwt = jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
-
-def create_access_token(user: User, expires_delta: timedelta):
-    """Create a JWT scoped for full access."""
-    return _create_jwt(user, expires_delta, TokenScope.ACCESS)
-
-def create_reset_password_token(user: User, expires_delta: timedelta):
-    """Create a JWT scoped only to reset password."""
-    return _create_jwt(user, expires_delta, TokenScope.RESET_PASSWORD)
 
 def decode_and_validate_token(token: Annotated[str, Depends(oauth2_scheme)]):
     """
@@ -334,7 +330,18 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
     """
     payload, user = decode_and_validate_token(token)
 
-    if payload['scope'] != TokenScope.ACCESS:
+    if payload['scope'] not in (TokenScope.ACCESS, TokenScope.ADMIN):
+        raise CREDENTIALS_EXCEPTION
+
+    return user
+
+async def get_current_admin_user(token: Annotated[str, Depends(oauth2_scheme)]):
+    """
+    Extract and validate the current admin-priviledged user from JWT token.
+    """
+    payload, user = decode_and_validate_token(token)
+
+    if payload['scope'] != TokenScope.ADMIN:
         raise CREDENTIALS_EXCEPTION
 
     return user
@@ -342,7 +349,7 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
 # ======= ENDPOINTS =======
 
 @router.post("/token")
-@limiter.limit("10/minute;50/hour;500/day")
+@ip_rate_limiter.limit("10/minute;50/hour;500/day")
 async def login_for_access_token(
     request: Request,
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
@@ -359,6 +366,11 @@ async def login_for_access_token(
     Raises:
         HTTPException: If authentication fails
     """
+    email_rate_limit(
+        "1/second; 10/minute; 30/hour",
+        "/auth/token",
+        form_data.username
+        )
     with get_connection() as db_conn:
         user = await authenticate_user(
             db_conn,
@@ -371,8 +383,11 @@ async def login_for_access_token(
                 detail="Incorrect username or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+        scope = TokenScope.ADMIN if user.is_admin else TokenScope.ACCESS
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(user, access_token_expires)
+        access_token = _create_jwt(user, access_token_expires, scope)
+
         return Token(access_token=access_token, token_type="bearer")
 
 @router.post("/new")
@@ -393,7 +408,7 @@ async def user_signup(
     Raises:
         HTTPException: If user with email already exists
     """
-    success = create_user(email, password)
+    success = create_user(email, str(password))
     if success:
         return {"success": True, "message": "User created successfully"}
     else:
@@ -436,7 +451,7 @@ async def request_password_reset(email: Annotated[str, Body()]) -> None:
         send_otp(otp, email)
 
 @router.post("/reset/verify")
-@limiter.limit("3/minute;10/15minute;30/hour")
+@ip_rate_limiter.limit("3/minute;10/15minute;30/hour")
 async def verify_otp(
     request: Request,
     email: Annotated[str, Body()],
@@ -459,6 +474,7 @@ async def verify_otp(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="Invalid email or OTP."
         )
+    email_rate_limit("1/second; 5/minute; 10/hour", "/auth/reset/verify", email)
 
     with get_connection() as db_conn:
         user = get_user(db_conn, email)
@@ -475,7 +491,7 @@ async def verify_otp(
         expires = timedelta(
             minutes=OTP_ACCESS_TOKEN_EXPIRE_MINUTES
             )
-        token = create_reset_password_token(user, expires)
+        token = _create_jwt(user, expires, TokenScope.RESET_PASSWORD)
         return Token(access_token=token, token_type="bearer")
 
 
