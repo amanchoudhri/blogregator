@@ -4,13 +4,13 @@ from fastapi import APIRouter, Body, HTTPException, status
 from psycopg.rows import class_row
 
 from ..database import get_connection
-from ..dependencies import CurrentUser
+from ..dependencies import CurrentActiveUser
 from ..models import Blog, Post
 
 router = APIRouter(prefix="/users")
 
 @router.get("/me/following")
-def get_followed_blogs(user: CurrentUser):
+def get_followed_blogs(user: CurrentActiveUser):
     """List all blogs a user follows."""
     with get_connection() as conn:
         BlogFactory = class_row(Blog)
@@ -25,7 +25,7 @@ def get_followed_blogs(user: CurrentUser):
     return {"blogs": blogs}
 
 @router.post("/me/following")
-def follow_blog(user: CurrentUser, blog_id: Annotated[int, Body()]):
+def follow_blog(user: CurrentActiveUser, blog_id: Annotated[int, Body()]):
     """Follow a blog."""
     try: 
         with get_connection() as conn:
@@ -42,7 +42,7 @@ def follow_blog(user: CurrentUser, blog_id: Annotated[int, Body()]):
             )
 
 @router.delete("/me/following/{blog_id}")
-def unfollow_blog(user: CurrentUser, blog_id: int):
+def unfollow_blog(user: CurrentActiveUser, blog_id: int):
     """Unfollow a blog."""
     try: 
         with get_connection() as conn:
@@ -70,7 +70,7 @@ def unfollow_blog(user: CurrentUser, blog_id: int):
 
 @router.get("/me/feed")
 def get_posts(
-    user: CurrentUser,
+    user: CurrentActiveUser,
     offset: int,
     limit: int,
     blog_id: Optional[int] = None,

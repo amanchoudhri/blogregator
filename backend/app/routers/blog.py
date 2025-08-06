@@ -14,7 +14,7 @@ import typer
 
 from bs4 import BeautifulSoup
 
-from app.dependencies import CurrentUser
+from app.dependencies import CurrentActiveUser
 from app.rate_limit import email_rate_limit
 
 from ..database import get_connection
@@ -46,7 +46,7 @@ def fetch_blogs():
     return {"blogs": blogs}
 
 @router.post("/new")
-def add_new_blog(user: CurrentUser, blog_link: Annotated[HttpUrl, Body()]):
+def add_new_blog(user: CurrentActiveUser, blog_link: Annotated[HttpUrl, Body()]):
     with get_connection() as db_conn:
         with db_conn.cursor(row_factory=class_row(Blog)) as cursor:
             search_match = f"%{blog_link.host}%"
@@ -80,7 +80,7 @@ def add_new_blog(user: CurrentUser, blog_link: Annotated[HttpUrl, Body()]):
         return {"schema": schema, "posts": posts}
 
 @router.post("/{blog_id}/refine")
-def refine_blog_schema(user: CurrentUser, blog_id: int, feedback: Annotated[str, Body()]):
+def refine_blog_schema(user: CurrentActiveUser, blog_id: int, feedback: Annotated[str, Body()]):
     email_rate_limit("5/5minutes; 10/hour", "/blog/refine", user.email)
 
     with get_connection() as db_conn:
@@ -134,7 +134,7 @@ def refine_blog_schema(user: CurrentUser, blog_id: int, feedback: Annotated[str,
         return {"schema": new_schema, "posts": reparsed_posts}
 
 @router.post("/{blog_id}/apply-refinement")
-def apply_refinement(user: CurrentUser, blog_id: int):
+def apply_refinement(user: CurrentActiveUser, blog_id: int):
     """
     Set the proposed schema for a blog to the main schema,
     if one exists.
@@ -171,7 +171,7 @@ def apply_refinement(user: CurrentUser, blog_id: int):
                 )
 
 @router.post("/{blog_id}/confirm")
-def confirm_scraping_schema(user: CurrentUser, blog_id: int):
+def confirm_scraping_schema(user: CurrentActiveUser, blog_id: int):
     """
     Confirm that a generated schema for a blog is successful.
 
@@ -209,7 +209,7 @@ def confirm_scraping_schema(user: CurrentUser, blog_id: int):
                 )
 
 @router.post("/{blog_id}/ticket")
-def open_ticket(user: CurrentUser, blog_id: int, message: Annotated[str, Body()]):
+def open_ticket(user: CurrentActiveUser, blog_id: int, message: Annotated[str, Body()]):
     with get_connection() as db_conn:
         check_blog_exists(db_conn, blog_id)
         # open the ticket
