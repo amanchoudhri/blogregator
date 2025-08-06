@@ -4,6 +4,7 @@ import secrets
 
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+from smtplib import SMTPException
 from typing import Annotated
 
 from argon2 import PasswordHasher
@@ -19,12 +20,13 @@ from jwt.exceptions import InvalidTokenError
 
 import psycopg
 from psycopg.rows import class_row
+from psycopg.errors import InterfaceError, DatabaseError, OperationalError
 
 from pydantic import AfterValidator, BaseModel, Field, EmailStr
 
 from ..database import get_connection
 from ..rate_limit import ip_rate_limiter, email_rate_limit
-from ..emails import send_otp_email
+from ..emails import send_otp_email, send_verification_email
 from ..utils import utcnow
 from ..models import User
 
@@ -37,7 +39,10 @@ if ALGORITHM not in {"HS256"}:
     raise RuntimeError(f"JWT_ALGORITHM {ALGORITHM} not permitted")
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS = 24
 OTP_ACCESS_TOKEN_EXPIRE_MINUTES = 5 # much shorter access for pw reset auth
+
+EMAIL_VERIFICATION_TOKEN_LENGTH = 32 # bytes
 
 OTP_LENGTH = 6 # digits in an OTP
 OTP_VALID_MINUTES = 15
@@ -335,6 +340,18 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
 
     return user
 
+async def get_current_active_user(token: Annotated[str, Depends(oauth2_scheme)]):
+    """
+    Extract and validate the current user from JWT token,
+    ensuring their email is verified.
+    """
+    payload, user = decode_and_validate_token(token)
+
+    if payload['scope'] not in (TokenScope.ACCESS, TokenScope.ADMIN):
+        raise CREDENTIALS_EXCEPTION
+
+    return user
+
 async def get_current_admin_user(token: Annotated[str, Depends(oauth2_scheme)]):
     """
     Extract and validate the current admin-priviledged user from JWT token.
@@ -343,6 +360,9 @@ async def get_current_admin_user(token: Annotated[str, Depends(oauth2_scheme)]):
 
     if payload['scope'] != TokenScope.ADMIN:
         raise CREDENTIALS_EXCEPTION
+
+    if not user.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="User's email is not verified.")
 
     return user
 
@@ -416,6 +436,83 @@ async def user_signup(
             status_code=status.HTTP_409_CONFLICT,
             detail="User with this email already exists"
         )
+
+@router.post("/email/send-verify")
+@ip_rate_limiter.limit("5/hour; 10/day")
+def request_email_verify(request: Request, user: Annotated[User, Depends(get_current_user)]):
+    email_rate_limit("5/10minutes; 10/day", "/email/send-verify", user.email)
+    with get_connection() as db_conn:
+        if user.is_active:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "User's email is already verified."
+                )
+        token = secrets.token_urlsafe(EMAIL_VERIFICATION_TOKEN_LENGTH)
+        
+        created_at = utcnow()
+        expires_at = created_at + timedelta(hours=EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS)
+
+        try:
+            db_conn.execute("""
+                INSERT INTO email_verification (token, user_id, created_at, expires_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    token = EXCLUDED.token,
+                    created_at = EXCLUDED.created_at,
+                    expires_at = EXCLUDED.expires_at
+                """, (token, user.id, created_at, expires_at))
+            send_verification_email(token, user.email)
+        except (InterfaceError, DatabaseError, OperationalError, SMTPException):
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "Unable to send email. Please try again."
+                )
+
+        return {"message": "Verification email sent"}
+
+@router.get("/email/verify")
+@ip_rate_limiter.limit("10/hour; 20/day")
+def confirm_email_verification(
+    request: Request,
+    token: str,
+    user: Annotated[User, Depends(get_current_user)]
+    ):
+    try:
+        bad_request_exc = HTTPException(status.HTTP_400_BAD_REQUEST, "Could not verify email.")
+        with get_connection() as db_conn:
+            issued_token = db_conn.execute(
+                "SELECT * FROM email_verification WHERE user_id = %s",
+                (user.id,)
+                ).fetchone()
+
+            if (issued_token is None):
+                raise bad_request_exc
+
+            wrong_token = issued_token['token'] != token
+            expired = issued_token['expires_at'] < utcnow()
+
+            if wrong_token or expired:
+                raise bad_request_exc
+
+            # put these two operations within one transaction
+            with db_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET is_active = TRUE WHERE id = %s",
+                    (user.id,)
+                    )
+                cur.execute(
+                    "DELETE FROM email_verification WHERE user_id = %s",
+                    (user.id,)
+                    )
+
+    except (OperationalError, DatabaseError, InterfaceError):
+        raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "Could not verify email, please try again."
+                )
+    return {"message": "Email verified successfully."}
+
+
 
 @router.post("/reset")
 async def request_password_reset(email: Annotated[str, Body()]) -> None:

@@ -17,12 +17,15 @@ SMTP_PORT = int(os.environ['SMTP_PORT'])
 SMTP_USER = os.environ['SMTP_USER']
 SMTP_PASSWORD = os.environ['SMTP_PASSWORD']
 
+def send_verification_email(token: str, recipient: str):
+    body_text = f"Your token is: {token}"
+    message = MIMEText(body_text)
+    _send_email(message, "no-reply@blogregator.app", [recipient])
 
 def send_otp_email(otp: str, recipient: str):
     body_text = f"Your OTP is: {otp}"
     message = MIMEText(body_text)
     _send_email(message, "no-reply@blogregator.app", [recipient])
-
 
 def _send_email(message: MIMEText, sender: str, recipients: list[str]):
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:

@@ -7,6 +7,7 @@ class User(BaseModel):
     email: EmailStr
     jwt_version: int
     is_admin: bool = False
+    is_active: bool
 
 class Blog(BaseModel):
     id: int
