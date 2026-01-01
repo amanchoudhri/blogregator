@@ -157,7 +157,14 @@ def reparse_post(
                 "matched_topics": result_obj.topics or [],
                 "new_topic_suggestions": [],
             }
-            add_post_to_db(cursor, result["blog_id"], result, metadata, upsert=True)
+            add_post_to_db(
+                cursor,
+                result["blog_id"],
+                result,
+                metadata,
+                upsert=True,
+                full_text=result_obj.extracted_text,
+            )
             conn.commit()
             typer.echo("Post reprocessed successfully.")
         except Exception as e:
@@ -257,18 +264,24 @@ def process_single_post(post: dict[str, Any], post_text: str | None = None) -> P
 
 
 def add_post_to_db(
-    cursor, blog_id: int, post_info: dict[str, str], metadata: dict[str, Any], upsert: bool = False
+    cursor,
+    blog_id: int,
+    post_info: dict[str, str],
+    metadata: dict[str, Any],
+    upsert: bool = False,
+    full_text: str | None = None,
 ):
     """Add a post to the database if it isn't already registered."""
     upsert_clause = """
-        ON CONFLICT (url)DO UPDATE SET
+        ON CONFLICT (url) DO UPDATE SET
         summary = EXCLUDED.summary,
-        reading_time = EXCLUDED.reading_time
+        reading_time = EXCLUDED.reading_time,
+        full_text = EXCLUDED.full_text
     """
 
     cursor.execute(
-        f"""INSERT INTO posts (blog_id, title, url, publication_date, reading_time, summary)
-        VALUES (%s, %s, %s, %s, %s, %s) {upsert_clause if upsert else ""}
+        f"""INSERT INTO posts (blog_id, title, url, publication_date, reading_time, summary, full_text)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) {upsert_clause if upsert else ""}
         """,
         (
             blog_id,
@@ -277,6 +290,7 @@ def add_post_to_db(
             post_info["date"],
             metadata["reading_time"],
             metadata["summary"],
+            full_text,
         ),
     )
     cursor.execute("SELECT id FROM posts WHERE url = %s", (post_info["post_url"],))

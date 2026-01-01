@@ -168,7 +168,13 @@ def process_blog(conn, blog, max_workers: int = 8) -> CheckMetrics:
             "matched_topics": result.topics or [],
             "new_topic_suggestions": [],
         }
-        add_post_to_db(cursor, blog["id"], result.original_post, metadata)
+        add_post_to_db(
+            cursor,
+            blog["id"],
+            result.original_post,
+            metadata,
+            full_text=result.extracted_text,
+        )
 
     # Update last_checked timestamp and mark as successful
     cursor.execute(
