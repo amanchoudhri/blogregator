@@ -1,13 +1,15 @@
-# Multi-stage build for optimized Docker image
-FROM python:3.11-slim as builder
+# Single-stage build using Playwright's base image
+FROM mcr.microsoft.com/playwright/python:v1.52.0-noble
 
 WORKDIR /app
 
-# Install system dependencies (including build tools for psycopg2)
+# Install system dependencies (build tools for psycopg2 and runtime deps)
 RUN apt-get update && apt-get install -y \
     curl \
     gcc \
     libpq-dev \
+    postgresql-client \
+    libpq5 \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -22,36 +24,23 @@ COPY sql ./sql
 # Install Python dependencies
 RUN uv sync --no-dev
 
-# Production stage
-FROM python:3.11-slim
+# Install Playwright Chromium browser
+RUN .venv/bin/python -m playwright install chromium
 
-WORKDIR /app
-
-# Install runtime dependencies (including libpq5 for psycopg2)
-RUN apt-get update && apt-get install -y \
-    postgresql-client \
-    libpq5 \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy from builder
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/src /app/src
-COPY --from=builder /app/sql /app/sql
-COPY --from=builder /app/pyproject.toml /app/pyproject.toml
-
-# Create non-root user
-RUN useradd -m -u 1000 blogregator && \
-    mkdir -p /app/logs && \
-    chown -R blogregator:blogregator /app
-
-USER blogregator
-
-# Create log directory
-RUN mkdir -p /app/logs
+# The Playwright image comes with user 'pwuser' (UID 1000)
+# Create log directory and set permissions
+RUN mkdir -p /app/logs && \
+    chown -R pwuser:pwuser /app
 
 # Add venv to PATH
 ENV PATH="/app/.venv/bin:$PATH"
+ENV VIRTUAL_ENV="/app/.venv"
+
+# Switch to non-root user (pwuser comes with Playwright image)
+USER pwuser
+
+# Ensure log directory exists with correct permissions
+RUN mkdir -p /app/logs
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
