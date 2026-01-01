@@ -37,6 +37,7 @@ Usage:
 """
 
 import argparse
+import multiprocessing as mp
 import os
 import sys
 from datetime import datetime
@@ -51,8 +52,16 @@ from blogregator.database import get_connection
 from blogregator.post import extract_post_text, extract_summary, extract_topics
 from blogregator.utils import fetch_with_retries
 
+# Default number of parallel workers
+DEFAULT_WORKERS = 8
 
-def get_posts_needing_backfill(cursor, hours: int | None = None, post_id: int | None = None):
+
+def get_posts_needing_backfill(
+    cursor,
+    hours: int | None = None,
+    post_id: int | None = None,
+    full_text_only: bool = False,
+):
     """
     Find posts that need metadata backfill.
 
@@ -60,44 +69,36 @@ def get_posts_needing_backfill(cursor, hours: int | None = None, post_id: int | 
         cursor: Database cursor
         hours: Only look at posts discovered in last N hours
         post_id: Specific post ID to backfill
+        full_text_only: If True, only find posts missing full_text (ignore other metadata)
 
     Returns:
         List of post records with missing metadata
     """
+    base_select = """
+        SELECT
+            id,
+            blog_id,
+            title,
+            url,
+            summary,
+            reading_time,
+            discovered_date,
+            technical_density,
+            full_text,
+            (SELECT COUNT(*) FROM post_topics WHERE post_id = posts.id) as topic_count
+        FROM posts
+    """
+
     if post_id:
+        cursor.execute(f"{base_select} WHERE id = %s", (post_id,))
+    elif full_text_only:
+        # Find all posts missing full_text
         cursor.execute(
-            """
-            SELECT 
-                id, 
-                blog_id, 
-                title, 
-                url, 
-                summary, 
-                reading_time,
-                discovered_date,
-                technical_density,
-                full_text,
-                (SELECT COUNT(*) FROM post_topics WHERE post_id = posts.id) as topic_count
-            FROM posts 
-            WHERE id = %s
-            """,
-            (post_id,),
+            f"{base_select} WHERE full_text IS NULL OR full_text = '' ORDER BY discovered_date DESC"
         )
     elif hours:
         cursor.execute(
-            """
-            SELECT 
-                id, 
-                blog_id, 
-                title, 
-                url, 
-                summary, 
-                reading_time,
-                discovered_date,
-                technical_density,
-                full_text,
-                (SELECT COUNT(*) FROM post_topics WHERE post_id = posts.id) as topic_count
-            FROM posts 
+            f"""{base_select}
             WHERE discovered_date > NOW() - INTERVAL '%s hours'
             AND (summary IS NULL OR summary = '' OR technical_density = -1)
             ORDER BY discovered_date DESC
@@ -106,19 +107,7 @@ def get_posts_needing_backfill(cursor, hours: int | None = None, post_id: int | 
         )
     else:
         cursor.execute(
-            """
-            SELECT 
-                id, 
-                blog_id, 
-                title, 
-                url, 
-                summary, 
-                reading_time,
-                discovered_date,
-                technical_density,
-                full_text,
-                (SELECT COUNT(*) FROM post_topics WHERE post_id = posts.id) as topic_count
-            FROM posts 
+            f"""{base_select}
             WHERE (summary IS NULL OR summary = '' OR technical_density = -1)
             ORDER BY discovered_date DESC
             LIMIT 50
@@ -132,6 +121,102 @@ def get_existing_topics(cursor):
     """Get all existing topic names from database."""
     cursor.execute("SELECT name FROM topics ORDER BY name")
     return [row["name"] for row in cursor.fetchall()]
+
+
+def backfill_full_text(cursor, post, dry_run: bool = False):
+    """
+    Fetch and save full_text for a single post.
+
+    Args:
+        cursor: Database cursor
+        post: Post record from database
+        dry_run: If True, don't actually update database
+
+    Returns:
+        dict with status and info
+    """
+    print(f"\n{'[DRY RUN] ' if dry_run else ''}Processing post {post['id']}: {post['title']}")
+    print(f"  URL: {post['url']}")
+
+    try:
+        print("  Fetching post content...")
+        response = fetch_with_retries(post["url"], retries=3, sleep=2)
+        text_content = extract_post_text(response.text)
+
+        if not text_content or len(text_content) < 100:
+            print(f"  Warning: Extracted text too short ({len(text_content or '')} chars)")
+            return {"status": "error", "error": "Text too short"}
+
+        print(f"  Extracted {len(text_content)} characters of text")
+
+        if not dry_run:
+            cursor.execute(
+                "UPDATE posts SET full_text = %s WHERE id = %s",
+                (text_content, post["id"]),
+            )
+            print("  Database updated")
+
+        return {"status": "success", "chars": len(text_content)}
+
+    except Exception as e:
+        print(f"  Error: {str(e)}")
+        return {"status": "error", "error": str(e)}
+
+
+def _backfill_full_text_worker(args: tuple) -> dict:
+    """
+    Worker function for parallel full_text backfill.
+
+    Each worker gets its own database connection since psycopg2 connections
+    are not thread/process safe.
+
+    Args:
+        args: Tuple of (post_dict, dry_run)
+
+    Returns:
+        dict with status, post_id, and error info if applicable
+    """
+    post, dry_run = args
+    post_id = post["id"]
+    title = post["title"][:50]
+
+    try:
+        response = fetch_with_retries(post["url"], retries=3, sleep=2)
+        text_content = extract_post_text(response.text)
+
+        if not text_content or len(text_content) < 100:
+            return {
+                "status": "error",
+                "post_id": post_id,
+                "title": title,
+                "error": f"Text too short ({len(text_content or '')} chars)",
+            }
+
+        if not dry_run:
+            # Each worker gets its own connection
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE posts SET full_text = %s WHERE id = %s",
+                (text_content, post_id),
+            )
+            conn.commit()
+            conn.close()
+
+        return {
+            "status": "success",
+            "post_id": post_id,
+            "title": title,
+            "chars": len(text_content),
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "post_id": post_id,
+            "title": title,
+            "error": str(e),
+        }
 
 
 def backfill_post(cursor, post, existing_topics: list[str], dry_run: bool = False):
@@ -306,11 +391,22 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true", help="Show what would be updated without making changes"
     )
+    parser.add_argument(
+        "--full-text-only",
+        action="store_true",
+        help="Only backfill full_text for posts missing it (skips summary/topics extraction)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of parallel workers (default: {DEFAULT_WORKERS})",
+    )
 
     args = parser.parse_args()
 
-    if not args.hours and not args.post_id:
-        parser.error("Must specify either --hours or --post-id")
+    if not args.hours and not args.post_id and not args.full_text_only:
+        parser.error("Must specify either --hours, --post-id, or --full-text-only")
 
     print("=" * 80)
     print("BACKFILL SCRIPT: Re-extract summaries and topics")
@@ -326,7 +422,12 @@ def main():
 
     # Get posts needing backfill
     print("\nFinding posts needing backfill...")
-    posts = get_posts_needing_backfill(cursor, hours=args.hours, post_id=args.post_id)
+    posts = get_posts_needing_backfill(
+        cursor,
+        hours=args.hours,
+        post_id=args.post_id,
+        full_text_only=args.full_text_only,
+    )
 
     if not posts:
         print("No posts found needing backfill!")
@@ -336,9 +437,12 @@ def main():
     print(f"Found {len(posts)} post(s) to backfill:\n")
     for post in posts:
         print(f"  {post['id']:3d}. {post['title'][:60]}")
-        print(
-            f"       Discovered: {post['discovered_date']}, Summary: {'✓' if post['summary'] else '✗'}, Topics: {post['topic_count']}"
-        )
+        if args.full_text_only:
+            print(f"       Discovered: {post['discovered_date']}")
+        else:
+            print(
+                f"       Discovered: {post['discovered_date']}, Summary: {'Y' if post['summary'] else 'N'}, Topics: {post['topic_count']}"
+            )
 
     # Confirm
     if not args.dry_run:
@@ -348,20 +452,42 @@ def main():
             conn.close()
             return
 
-    # Get existing topics
-    existing_topics = get_existing_topics(cursor)
-    print(f"\nLoaded {len(existing_topics)} existing topics from database")
-
     # Process each post
     results = {"success": 0, "partial": 0, "error": 0}
 
-    for i, post in enumerate(posts, 1):
-        print(f"\n[{i}/{len(posts)}] ", end="")
-        result = backfill_post(cursor, post, existing_topics, dry_run=args.dry_run)
-        results[result["status"]] += 1
+    if args.full_text_only:
+        # Full-text only mode: parallel processing
+        num_workers = min(args.workers, len(posts))
+        print(f"\nProcessing with {num_workers} parallel workers...")
 
-        if not args.dry_run and result["status"] in ["success", "partial"]:
-            conn.commit()
+        # Prepare work items - convert RealDictRow to regular dict for pickling
+        work_items = [(dict(post), args.dry_run) for post in posts]
+
+        with mp.Pool(processes=num_workers) as pool:
+            for i, result in enumerate(
+                pool.imap_unordered(_backfill_full_text_worker, work_items), 1
+            ):
+                status = result["status"]
+                results[status] += 1
+
+                if status == "success":
+                    print(f"[{i}/{len(posts)}] OK: {result['title']} ({result['chars']} chars)")
+                else:
+                    print(
+                        f"[{i}/{len(posts)}] FAIL: {result['title']} - {result.get('error', 'Unknown')}"
+                    )
+    else:
+        # Full metadata backfill mode
+        existing_topics = get_existing_topics(cursor)
+        print(f"\nLoaded {len(existing_topics)} existing topics from database")
+
+        for i, post in enumerate(posts, 1):
+            print(f"\n[{i}/{len(posts)}] ", end="")
+            result = backfill_post(cursor, post, existing_topics, dry_run=args.dry_run)
+            results[result["status"]] += 1
+
+            if not args.dry_run and result["status"] in ["success", "partial"]:
+                conn.commit()
 
     # Summary
     print("\n" + "=" * 80)
