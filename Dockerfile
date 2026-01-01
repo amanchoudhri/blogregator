@@ -24,8 +24,12 @@ COPY sql ./sql
 # Install Python dependencies
 RUN uv sync --no-dev
 
+# Set Playwright browser path to app directory (avoids lock issues with /ms-playwright)
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
+
 # Install Playwright Chromium browser
-RUN .venv/bin/python -m playwright install chromium
+RUN mkdir -p /app/.playwright-browsers && \
+    .venv/bin/python -m playwright install chromium
 
 # The Playwright image comes with user 'pwuser' (UID 1000)
 # Create log directory and set permissions

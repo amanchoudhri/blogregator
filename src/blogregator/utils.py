@@ -1,3 +1,4 @@
+import concurrent.futures
 import datetime
 import os
 import subprocess
@@ -33,23 +34,10 @@ class FetchError(Exception):
     pass
 
 
-def fetch_with_retries(url: str, retries: int = 3, sleep: int = 1) -> FetchResponse:
+def _fetch_with_playwright(url: str, retries: int = 3, sleep_time: int = 1) -> FetchResponse:
     """
-    Fetch HTML content from a URL using Playwright, with retry logic.
-
-    Uses a headless Chromium browser to render JavaScript and handle
-    dynamic content that simple HTTP requests cannot capture.
-
-    Args:
-        url: The URL to fetch
-        retries: Number of retry attempts (default: 3)
-        sleep: Seconds to wait between retries (default: 1)
-
-    Returns:
-        FetchResponse object with content, text, status_code, and url attributes
-
-    Raises:
-        FetchError: If all retry attempts fail
+    Internal function that performs the actual Playwright fetch.
+    Runs in a thread pool to work in both sync and async contexts.
     """
     last_error = None
 
@@ -91,9 +79,37 @@ def fetch_with_retries(url: str, retries: int = 3, sleep: int = 1) -> FetchRespo
             last_error = e
             print(f"Error fetching the URL (attempt {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
-                time.sleep(sleep)
+                time.sleep(sleep_time)
 
     raise FetchError(f"Unable to retrieve content from page: {url}. Last error: {last_error}")
+
+
+# Thread pool for running Playwright (avoids async context issues)
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+
+def fetch_with_retries(url: str, retries: int = 3, sleep: int = 1) -> FetchResponse:
+    """
+    Fetch HTML content from a URL using Playwright, with retry logic.
+
+    Uses a headless Chromium browser to render JavaScript and handle
+    dynamic content that simple HTTP requests cannot capture.
+
+    Playwright is run in a thread pool to avoid issues with async event loops.
+
+    Args:
+        url: The URL to fetch
+        retries: Number of retry attempts (default: 3)
+        sleep: Seconds to wait between retries (default: 1)
+
+    Returns:
+        FetchResponse object with content, text, status_code, and url attributes
+
+    Raises:
+        FetchError: If all retry attempts fail
+    """
+    future = _executor.submit(_fetch_with_playwright, url, retries, sleep)
+    return future.result(timeout=retries * 30 + 10)  # Reasonable timeout
 
 
 def multiline_user_input(initial_message: str = ""):
