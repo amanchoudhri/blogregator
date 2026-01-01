@@ -9,6 +9,28 @@ wheels/
 # Virtual environments
 .venv
 
-.DS_Store
+# Logs
+logs/
+*.log
+
+# Environment & Config
 .env
+.env.local
+.env.*.local
+
+# Databases
 blogregator.db
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Nix
+result
+result-*
+.direnv/

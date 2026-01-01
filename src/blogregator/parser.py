@@ -1,12 +1,17 @@
 import datetime
+from typing import Any
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-from typing import List, Any, Optional
 
 from blogregator.utils import fetch_with_retries
 
-def parse_date(date_str: str, format: str, alternate_formats: List[str] = []) -> str | None:
+
+def parse_date(
+    date_str: str, format: str, alternate_formats: list[str] | None = None
+) -> str | None:
+    if alternate_formats is None:
+        alternate_formats = []
     try:
         return datetime.datetime.strptime(date_str, format).isoformat()
     except ValueError:
@@ -15,6 +20,7 @@ def parse_date(date_str: str, format: str, alternate_formats: List[str] = []) ->
                 return datetime.datetime.strptime(date_str, alt_format).isoformat()
             except ValueError:
                 pass
+
 
 def parse_post_list(page_url: str, config: dict[str, Any]) -> list[dict[str, Any]]:
     """
@@ -39,8 +45,8 @@ def parse_post_list(page_url: str, config: dict[str, Any]) -> list[dict[str, Any
     """
     response = fetch_with_retries(page_url)
 
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
+    soup = BeautifulSoup(response.text, "html.parser")
+
     post_item_selector = config.get("post_item_selector")
     if not post_item_selector:
         print(f"Error: 'post_item_selector' not found in config for {page_url}.")
@@ -59,18 +65,16 @@ def parse_post_list(page_url: str, config: dict[str, Any]) -> list[dict[str, Any
 
     results: list[dict[str, Any]] = []
     for post_element in post_elements:
-        post_data: dict[str, Optional[str]] = {
-            "title": None,
-            "post_url": None,
-            "date": None
-        }
+        post_data: dict[str, str | None] = {"title": None, "post_url": None, "date": None}
         for field_name, field_spec in fields_config.items():
-            if field_name not in post_data: # Only process 'title', 'post_url', 'date'
+            if field_name not in post_data:  # Only process 'title', 'post_url', 'date'
                 continue
 
             item_selector = field_spec.get("selector")
             if not item_selector:
-                print(f"Warning: Missing 'selector' for field '{field_name}' in config for {page_url}.")
+                print(
+                    f"Warning: Missing 'selector' for field '{field_name}' in config for {page_url}."
+                )
                 continue
 
             target_element = post_element.select_one(item_selector)
@@ -79,33 +83,38 @@ def parse_post_list(page_url: str, config: dict[str, Any]) -> list[dict[str, Any
                 # print(f"Warning: Element for field '{field_name}' with selector '{item_selector}' not found in a post item on {page_url}.")
                 continue
 
-            value: Optional[str] = None
+            value: str | None = None
             attribute_name = field_spec.get("attribute")
-            if field_name == 'post_url' and attribute_name is None:
+            if field_name == "post_url" and attribute_name is None:
                 attribute_name = "href"
 
             if attribute_name:
                 value = target_element.get(attribute_name)
             else:
                 value = target_element.get_text(strip=True)
-            
-            if value is not None: # Ensure value was actually extracted
+
+            if value is not None:  # Ensure value was actually extracted
                 if field_name == "post_url":
-                    if field_spec.get("base_url_handling") == "relative_to_page" and \
-                       value and not value.startswith(('http://', 'https://', '#')):
+                    if (
+                        field_spec.get("base_url_handling") == "relative_to_page"
+                        and value
+                        and not value.startswith(("http://", "https://", "#"))
+                    ):
                         value = urljoin(page_url, value)
                 if field_name == "date":
                     value = parse_date(
-                        value, field_spec['format'], field_spec.get('alternate_formats', [])
+                        value, field_spec["format"], field_spec.get("alternate_formats", [])
                     )
                 post_data[field_name] = value
-            
+
         # Basic validation: ensure we have at least a title and URL for it to be a useful entry
         if post_data.get("title") and post_data.get("post_url"):
-            results.append(post_data) # type: ignore 
+            results.append(post_data)  # type: ignore
             # We initialized with None, but now we're appending a dict that might still have Nones
             # but the important ones (title, post_url) are checked.
         else:
-            print(f"Skipping a post item from {page_url} due to missing title or URL. Data: {post_data}")
-            
+            print(
+                f"Skipping a post item from {page_url} due to missing title or URL. Data: {post_data}"
+            )
+
     return results

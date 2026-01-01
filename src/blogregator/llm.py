@@ -3,20 +3,22 @@ LLM utilities for Blogregator.
 
 This module contains shared functionality for interacting with LLMs.
 """
+
 import json
 import os
 import time
-from typing import Optional, Dict, Any, Literal
+from typing import Any, Literal
 
 from litellm import completion
 
+
 def generate_json_from_llm(
     prompt: str,
-    model: str = "gemini/gemini-2.5-flash-preview-05-20",
+    model: str = "gemini/gemini-3-flash-preview",
     max_retries: int = 3,
     retry_delay: float = 1.0,
-    response_schema: Optional[Dict[str, Any]] = None,
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    response_schema: dict[str, Any] | None = None,
+    reasoning_effort: Literal["low", "medium", "high"] | None = None,
 ) -> dict:
     """
     Get JSON output from LLM with error handling and retries.
@@ -44,35 +46,39 @@ def generate_json_from_llm(
     last_error = None
     for attempt in range(max_retries):
         try:
-            response_format = {
-                "type": "json_schema", "json_schema": response_schema, "strict": True
-                } if response_schema else None
+            response_format = (
+                {"type": "json_schema", "json_schema": response_schema, "strict": True}
+                if response_schema
+                else None
+            )
 
             response = completion(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 api_key=api_key,
                 response_format=response_format,
-                reasoning_effort=reasoning_effort
+                reasoning_effort=reasoning_effort,
             )
-            
+
             # Extract the generated json from the response
             result = response.choices[0].message.content  # type: ignore
-            
+
             # Clean up the response - remove markdown code blocks if present
             if "```json" in result:
                 result = result.split("```json")[1]
                 if "```" in result:
                     result = result.split("```")[0]
-            
+
             return json.loads(result)
-            
+
         except Exception as e:
             last_error = e
             if attempt < max_retries - 1:
-                print(f"LLM request attempt {attempt+1} failed: {e}. Retrying...")
+                print(f"LLM request attempt {attempt + 1} failed: {e}. Retrying...")
                 time.sleep(retry_delay)
             continue
-    
+
     # If we get here, all retries failed
-    raise Exception(f"Failed to get valid JSON from LLM after {max_retries} attempts") from last_error
+    raise Exception(
+        f"Failed to get valid JSON from LLM after {max_retries} attempts"
+    ) from last_error

@@ -47,10 +47,10 @@ Newsletter with 1 posts sent successfully
 Blogregator uses a combination of web scraping and large language models to monitor a list of blogs for new posts. Here's a breakdown of the process:
 
 1.  **Add a Blog**: You can add a blog to the monitoring list via a command-line interface (CLI). The tool will fetch the blog's content and use an LLM to generate a suitable scraping schema.
-2.  **Scheduled Checks**: A GitHub Actions workflow runs on a schedule (daily by default) to check for new blog posts.
+2.  **Automated Checks**: A long-running server checks for new blog posts every 6 hours (configurable).
 3.  **Scraping and Parsing**: For each blog, the system scrapes the main page and parses it to find new posts that aren't already in the database.
 4.  **Content Extraction**: For each new post, it extracts the full text content and uses an LLM to generate a summary, estimate the reading time, and categorize it with relevant topics.
-5.  **Email Newsletter**: If new posts are found, the system will send an email newsletter to a specified address with a summary of the new content.
+5.  **Daily Newsletter**: Each day at midnight UTC, a digest newsletter is sent with new posts from the past 24 hours.
 
 ## Getting Started
 
@@ -142,10 +142,35 @@ Once installed and set up, you can use the `blogregator` command-line tool.
     blogregator send-newsletter
     ```
 
-## Automated Deployment with GitHub Actions
+## Deployment Options
 
-It's easy to deploy blogregator on Github Actions to automatically check for new blog posts.
+### Option 1: Docker Server (Recommended)
+
+Run Blogregator as a long-running server on your VPS with Docker:
+
+```bash
+# Quick start
+./scripts/start.sh
+
+# Access dashboard
+open http://localhost:8000
+```
+
+**Features:**
+- 📊 Real-time dashboard with status and statistics
+- 🔄 Automatic checks every 6 hours (configurable)
+- 📧 Daily digest newsletter at midnight UTC
+- 🚨 Alert emails for critical errors
+- 📝 Structured JSON logging with rotation
+- 🔁 Automatic retry with exponential backoff
+- 🐳 Easy deployment with Docker Compose
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for complete Docker deployment instructions.
+
+### Option 2: GitHub Actions (Legacy)
+
+Alternatively, deploy on GitHub Actions for serverless operation:
 
 This repository includes a pre-made workflow in `.github/workflows/blog-monitor.yml` that automatically checks for new posts and sends a newsletter on a schedule.
 
-To use it, you must configure the environment variables from Step 3 as **Actions secrets** in your forked repository's settings (`Settings > Secrets and variables > Actions`).
+To use it, configure the environment variables as **Actions secrets** in your repository settings (`Settings > Secrets and variables > Actions`).
