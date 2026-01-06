@@ -34,3 +34,6 @@ blogregator.db
 result
 result-*
 .direnv/
+
+# Opencode
+session-*.md
