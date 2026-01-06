@@ -1,6 +1,7 @@
 """Scheduler for periodic blog checks and newsletter sending."""
 
 import logging
+import signal
 from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,6 +16,22 @@ from tenacity import (
 from blogregator.alerts import alert_check_failed, alert_newsletter_failed
 from blogregator.config import get_config
 from blogregator.core import run_blog_check, send_newsletter_if_needed
+
+# Maximum time a blog check job can run before being killed (in seconds)
+# This prevents zombie jobs from blocking the scheduler
+MAX_JOB_DURATION_SECONDS = 3 * 60 * 60  # 3 hours
+
+
+class JobTimeoutError(Exception):
+    """Raised when a job exceeds its maximum allowed duration."""
+
+    pass
+
+
+def _timeout_handler(signum, frame):
+    """Signal handler for job timeout."""
+    raise JobTimeoutError(f"Job exceeded maximum duration of {MAX_JOB_DURATION_SECONDS} seconds")
+
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +64,16 @@ def scheduled_blog_check_with_retry():
 
     config = get_config()
     logger.info("Starting scheduled blog check")
+
+    # Set up a timeout alarm to prevent zombie jobs
+    # Note: signal.alarm only works on Unix and in the main thread
+    try:
+        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(MAX_JOB_DURATION_SECONDS)
+    except (ValueError, AttributeError):
+        # signal.alarm not available (Windows or not main thread)
+        old_handler = None
+        logger.warning("Job timeout protection not available on this platform")
 
     try:
         # Run blog check
@@ -94,6 +121,17 @@ def scheduled_blog_check_with_retry():
             else:
                 logger.info("Newsletter sent successfully", extra={"posts_count": n_posts})
 
+    except JobTimeoutError as e:
+        logger.critical(
+            "Scheduled blog check timed out",
+            extra={"error": str(e), "timeout_seconds": MAX_JOB_DURATION_SECONDS},
+        )
+        _last_check_time = datetime.utcnow()
+        _last_check_result = {
+            "success": False,
+            "error": f"Job timed out after {MAX_JOB_DURATION_SECONDS} seconds",
+        }
+        raise
     except Exception as e:
         logger.error(
             "Scheduled blog check failed with exception", extra={"error": str(e)}, exc_info=True
@@ -104,6 +142,14 @@ def scheduled_blog_check_with_retry():
             "error": str(e),
         }
         raise
+    finally:
+        # Cancel the alarm and restore the old handler
+        try:
+            signal.alarm(0)
+            if old_handler is not None:
+                signal.signal(signal.SIGALRM, old_handler)
+        except (ValueError, AttributeError):
+            pass
 
 
 def scheduled_blog_check():

@@ -112,7 +112,7 @@ def process_blog(conn, blog, max_workers: int = 8) -> CheckMetrics:
         },
     )
 
-    # Process posts in parallel
+    # Process posts in parallel with timeout protection
     results = []
     if new_posts:
         max_workers_actual = min(os.cpu_count() or 4, len(new_posts), max_workers)
@@ -126,8 +126,22 @@ def process_blog(conn, blog, max_workers: int = 8) -> CheckMetrics:
             },
         )
 
+        # Use imap_unordered with timeout to prevent hanging on stuck posts
+        # Each post gets up to 2 minutes (Playwright timeout + buffer)
+        per_post_timeout = 120
         with mp.Pool(processes=max_workers_actual) as pool:
-            results = list(pool.map(process_single_post, new_posts))
+            async_results = pool.imap_unordered(process_single_post, new_posts)
+            for _ in new_posts:
+                try:
+                    result = async_results.next(timeout=per_post_timeout)
+                    results.append(result)
+                except mp.TimeoutError:
+                    logger.warning(
+                        f"Post processing timed out after {per_post_timeout}s",
+                        extra={"blog_id": blog["id"], "blog_name": blog_name},
+                    )
+                except StopIteration:
+                    break
 
     # Batch database operations
     posts_to_save = []
